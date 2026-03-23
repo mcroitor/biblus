@@ -41,10 +41,9 @@ Styling is based on Skeleton CSS. Re-active part is based on JS standard built-i
 
 ### Backend
 
-
 ## Output structure
 
-```
+```text
 output_dir/
 ├── README.md          # Book description with content references
 ├── chapter_1.md       # Chapter 1
