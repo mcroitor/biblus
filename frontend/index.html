@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biblus: PDF to Markdown</title>
+    <link media="all" rel="stylesheet" href="css/normalize.css" />
+    <link media="all" rel="stylesheet" href="css/skeleton.css" />
+    <link media="all" rel="stylesheet" href="css/app.css" />
+    <script lang="javascript" src="js/app.js"></script>
+</head>
+
+<body>
+    <header class="container">
+        <h1>Biblus: PDF to Markdown</h1>
+        <p>An AI tool for PDF documents recognition and conversion to the Markdown format.</p>
+    </header>
+    <main class="container">
+        <div class="row">
+            <div class="six columns">
+                <div id="input-form-block">
+                    <h4>Attach a picture</h4>
+                    <input type="file" id="page-image-btn" class="button u-full-width" value="select page scan">
+                    <hr />
+                    <input type="button" value="Upload" class="button button-primary u-full-width" onclick="upload()" />
+                </div>
+            </div>
+            <div class="six columns">
+                <div id="preview-block">
+                    No preview
+                </div>
+            </div>
+        </div>
+        <div class="row">
+            <div class="twelve columns">
+                <div id="result-block">
+                    No result
+                </div>
+            </div>
+        </div>
+    </main>"
+</body>
+
+</html>
