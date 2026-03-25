@@ -1,187 +1,398 @@
 <?php
 
+if (php_sapi_name() !== 'cli') {
+    die("This script must be run from the command line.");
+}
+
 /**
  * OMNIBUS OCR: PDF/PNG -> Markdown with image preservation
  * Usage: php omnibus_ocr.php <input_path> [output_dir]
  */
 
-// --- SETTINGS ---
-define('OLLAMA_API_URL', 'http://localhost:11434/api/chat');
-define('OLLAMA_MODEL', 'deepseek-v2'); // Recommended model with Vision (16b+), Llama-3.2-Vision
-define('PDF_DPI', 300);                // DPI for high-quality OCR
-define('TIMEOUT_SECONDS', 600);        // 10 minutes per page
+define('OLLAMA_URL', getenv('OLLAMA_SERVER') ?: 'http://localhost:11434');
+define('OLLAMA_API_URL', OLLAMA_URL . '/api/chat');
+define('OLLAMA_MODEL', getenv('OLLAMA_MODEL') ?: 'deepseek-ocr:3b');
+define('PDF_DPI', 300);
+define('TIMEOUT_SECONDS', 600);
 
-// --- 1. ENVIRONMENT AND ARGUMENT CHECK ---
-if ($argc < 2) {
-    die("Usage: php omnibus_ocr.php <input_pdf_or_dir> [output_dir]\n");
+function validateArguments(array $argv): array
+{
+    if (count($argv) < 2) {
+        die("Usage: php omnibus_ocr.php <input_pdf_or_dir> [output_dir]\n");
+    }
+
+    $inputPath = rtrim($argv[1], DIRECTORY_SEPARATOR);
+    $baseOutputDir = rtrim($argv[2] ?? 'book_export', DIRECTORY_SEPARATOR);
+
+    return ['inputPath' => $inputPath, 'baseOutputDir' => $baseOutputDir];
 }
 
-$inputPath = rtrim($argv[1], DIRECTORY_SEPARATOR);
-$baseOutputDir = rtrim($argv[2] ?? 'book_export', DIRECTORY_SEPARATOR);
-
-if (!is_dir($baseOutputDir)) mkdir($baseOutputDir, 0755, true);
-
-// --- 2. PREPARING THE LIST OF PAGES ---
-$pagesToProcess = [];
-$isTempDir = false;
-$tempDir = $baseOutputDir . DIRECTORY_SEPARATOR . "_internal_temp";
-
-if (is_file($inputPath) && strtolower(pathinfo($inputPath, PATHINFO_EXTENSION)) === 'pdf') {
-    $pagesToProcess = convertPdfToPng($inputPath, $tempDir);
-    $isTempDir = true;
-} elseif (is_dir($inputPath)) {
-    $pagesToProcess = glob($inputPath . DIRECTORY_SEPARATOR . "*.png");
-    natsort($pagesToProcess);
-} else {
-    die("Error: Input must be a PDF file or a directory containing PNG images.\n");
-}
-
-if (empty($pagesToProcess)) die("Error: No pages found to process.\n");
-
-// --- 3. MAIN PROCESSING LOOP ---
-$manifest = [];
-echo "\nStarting OCR for " . count($pagesToProcess) . " pages...\n";
-
-foreach ($pagesToProcess as $index => $imagePath) {
-    $pageName = sprintf("page_%03d", $index + 1);
-    echo "Processing [$pageName]...";
-
-    $pageDir = $baseOutputDir . DIRECTORY_SEPARATOR . $pageName;
-    if (!is_dir($pageDir)) mkdir($pageDir, 0755, true);
-
-    $imgDir = $pageDir . DIRECTORY_SEPARATOR . "images";
-    if (!is_dir($imgDir)) mkdir($imgDir, 0755, true);
-
-    $mdFile = $pageDir . DIRECTORY_SEPARATOR . "index.md";
-
-    try {
-        // Step A: Detect and crop visual elements
-        $grounding = detectVisuals($imagePath);
-        $placeholders = [];
-        if (!empty($grounding)) {
-            $placeholders = cropVisuals($imagePath, $grounding, $imgDir, "images");
-        }
-
-        // Step B: OCR text with placeholders for cropped visuals
-        $markdown = performOcr($imagePath, $placeholders);
-        file_put_contents($mdFile, $markdown);
-
-        $manifest[] = ['name' => $pageName, 'file' => $mdFile];
-        echo " OK\n";
-
-    } catch (Exception $e) {
-        echo " FAILED: " . $e->getMessage() . "\n";
+function ensureDirectoryExists(string $path): void
+{
+    if (!is_dir($path)) {
+        mkdir($path, 0755, true);
     }
 }
 
-// --- 4. ASSEMBLING THE FINAL BOOK ---
-assembleFullBook($baseOutputDir, $manifest);
+function checkModelExists(): bool
+{
+    echo "Checking if model '" . OLLAMA_MODEL . "' is available...\n";
 
-// Cleaning up temporary files
-if ($isTempDir) {
-    echo "Cleaning up temporary PNG files...\n";
-    foreach (glob($tempDir . "/*.png") as $tFile) unlink($tFile);
-    rmdir($tempDir);
+    $ch = curl_init(OLLAMA_URL . '/api/tags');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+    $response = curl_exec($ch);
+    $curlError = curl_error($ch);
+    $curlErrno = curl_errno($ch);
+    curl_close($ch);
+
+    if ($curlErrno) {
+        die("Error: Could not connect to Ollama server at " . OLLAMA_URL . "\ncURL Error: $curlError\n");
+    }
+
+    $data = json_decode($response, true);
+    if ($data === null) {
+        die("Error: Invalid response from Ollama server.\n");
+    }
+
+    $models = array_column($data['models'] ?? [], 'name');
+
+    if (!in_array(OLLAMA_MODEL, $models)) {
+        die("Error: Model '" . OLLAMA_MODEL . "' is not installed. Run: ollama pull " . OLLAMA_MODEL . "\n");
+    }
+
+    echo "Model '" . OLLAMA_MODEL . "' is available.\n";
+    return true;
 }
 
-echo "\n*** COMPLETED SUCCESSFULLY ***\n";
-echo "Final document: $baseOutputDir/full_book.md\n";
+function preloadModel(): void
+{
+    $data = [
+        "model" => OLLAMA_MODEL,
+        "keep_alive" => -1
+    ];
 
+    $ch = curl_init(OLLAMA_URL . '/api/generate');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
 
-// ============================================================================
-// FUNCTIONS
-// ============================================================================
+    echo "Preloading model to GPU...\n";
+    $response = curl_exec($ch);
 
-function convertPdfToPng($pdf, $out) {
-    if (!is_dir($out)) mkdir($out, 0755, true);
-    echo "Rendering PDF to high-res PNGs (this may take time)... \n";
+    if (curl_errno($ch)) {
+        echo 'Error: ' . curl_error($ch) . "\n";
+    } else {
+        echo "Model successfully loaded into GPU memory.\n";
+    }
+
+    curl_close($ch);
+}
+
+function sendRequest(string $prompt, array $imgs, float $temp = 0.2): string
+{
+    $payload = [
+        "model" => OLLAMA_MODEL,
+        "messages" => [
+            [
+                "role" => "user",
+                "content" => $prompt,
+                "images" => $imgs
+            ]
+        ],
+        "stream" => false,
+        "options" => [
+            "temperature" => $temp,
+            "num_predict" => 4096
+        ]
+    ];
+
+    $ch = curl_init(OLLAMA_API_URL);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, TIMEOUT_SECONDS);
+
+    $response = curl_exec($ch);
+    $curlErrno = curl_errno($ch);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    if ($curlErrno) {
+        die("cURL Error: $curlError\n");
+    }
+
+    $data = json_decode($response, true);
+    if ($data === null) {
+        die("Error: Invalid JSON response from Ollama.\n");
+    }
+
+    return $data['message']['content'] ?? '';
+}
+
+function convertPdfToPng(string $pdfPath, string $outDir): array
+{
+    if (!extension_loaded('imagick')) {
+        die("Error: Imagick extension is not installed. Run: apt install php-imagick\n");
+    }
+
+    if (!file_exists($pdfPath)) {
+        die("Error: PDF file not found: $pdfPath\n");
+    }
+
+    ensureDirectoryExists($outDir);
+    echo "Rendering PDF to high-res PNGs (this may take time)...\n";
+
     $im = new Imagick();
     $im->setResolution(PDF_DPI, PDF_DPI);
-    $im->readImage($pdf);
+    $im->readImage($pdfPath);
+
     $paths = [];
     foreach ($im as $i => $page) {
         $page->setImageFormat('png');
-        $target = $out . DIRECTORY_SEPARATOR . sprintf("page_%03d.png", $i + 1);
-        $page->writeImage($target);
+        $target = $outDir . DIRECTORY_SEPARATOR . sprintf("page_%03d.png", $i + 1);
+        
+        if (!$page->writeImage($target)) {
+            echo "\nWarning: Could not write $target\n";
+            continue;
+        }
+        
         $paths[] = $target;
         echo ".";
     }
-    $im->clear(); $im->destroy();
+
+    $im->clear();
+    $im->destroy();
     echo " Done.\n";
+
+    if (empty($paths)) {
+        die("Error: No pages were rendered from PDF.\n");
+    }
+
     return $paths;
 }
 
-function detectVisuals($path) {
-    $img = base64_encode(file_get_contents($path));
-    $prompt = "Analyze the image. Identify images, diagrams, or charts. Return a JSON array of their [ymin, xmin, ymax, xmax] coordinates (0-1000) and descriptions. Output ONLY JSON. Format: [{\"box_2d\": [y1,x1,y2,x2], \"label\": \"description\"}]";
-    $raw = sendRequest($prompt, [$img]);
-    if (preg_match('/\[\s*\{.*\}\s*\]/s', $raw, $m)) {
-        return json_decode($m[0], true) ?: [];
+function findInputFiles(string $inputPath, string $tempDir): array
+{
+    $pagesToProcess = [];
+    $isTempDir = false;
+
+    if (is_file($inputPath) && strtolower(pathinfo($inputPath, PATHINFO_EXTENSION)) === 'pdf') {
+        $pagesToProcess = convertPdfToPng($inputPath, $tempDir);
+        $isTempDir = true;
+    } elseif (is_dir($inputPath)) {
+        $pagesToProcess = glob($inputPath . DIRECTORY_SEPARATOR . "*.png");
+        natsort($pagesToProcess);
+        $pagesToProcess = array_values($pagesToProcess);
+    } else {
+        die("Error: Input must be a PDF file or a directory containing PNG images.\n");
     }
+
+    if (empty($pagesToProcess)) {
+        die("Error: No pages found to process.\n");
+    }
+
+    return ['pages' => $pagesToProcess, 'isTempDir' => $isTempDir];
+}
+
+function detectVisuals(string $imagePath): array
+{
+    $imageContent = file_get_contents($imagePath);
+    if ($imageContent === false) {
+        die("Error: Could not read image: $imagePath\n");
+    }
+
+    $imageData = base64_encode($imageContent);
+    $prompt = "Analyze the image. Identify images, diagrams, or charts. Return a JSON array of their [ymin, xmin, ymax, xmax] coordinates (0-1000) and descriptions. Output ONLY JSON. Format: [{\"box_2d\": [y1,x1,y2,x2], \"label\": \"description\"}]";
+
+    $raw = sendRequest($prompt, [$imageData]);
+
+    if (preg_match('/(\[\s*\[.*\]\s*\]|\[\s*\{.*\}\s*\])/s', $raw, $matches)) {
+        $decoded = json_decode($matches[0], true);
+        if (is_array($decoded) && !empty($decoded)) {
+            foreach ($decoded as $item) {
+                if (!isset($item['box_2d']) || !is_array($item['box_2d']) || count($item['box_2d']) !== 4) {
+                    return [];
+                }
+            }
+            return $decoded;
+        }
+    }
+
     return [];
 }
 
-function cropVisuals($src, $info, $out, $rel) {
-    $gd = imagecreatefrompng($src);
-    list($w_orig, $h_orig) = getimagesize($src);
-    $pls = [];
+function cropVisuals(string $sourcePath, array $info, string $outDir, string $relDir): array
+{
+    $img = imagecreatefrompng($sourcePath);
+    if (!$img) {
+        die("Error: Could not read image: $sourcePath\n");
+    }
+
+    $imageSize = getimagesize($sourcePath);
+    if ($imageSize === false) {
+        imagedestroy($img);
+        die("Error: Could not get image size: $sourcePath\n");
+    }
+
+    $w_orig = $imageSize[0];
+    $h_orig = $imageSize[1];
+    $placeholders = [];
+
     foreach ($info as $i => $item) {
+        if (!isset($item['box_2d']) || !is_array($item['box_2d']) || count($item['box_2d']) !== 4) {
+            continue;
+        }
+
         $b = $item['box_2d'];
-        $y1 = ($b[0]/1000)*$h_orig; $x1 = ($b[1]/1000)*$w_orig;
-        $y2 = ($b[2]/1000)*$h_orig; $x2 = ($b[3]/1000)*$w_orig;
-        $cw = max(2, $x2-$x1); $ch = max(2, $y2-$y1);
-        
-        $crop = imagecrop($gd, ['x'=>$x1, 'y'=>$y1, 'width'=>$cw, 'height'=>$ch]);
+        $y1 = ($b[0] / 1000) * $h_orig;
+        $x1 = ($b[1] / 1000) * $w_orig;
+        $y2 = ($b[2] / 1000) * $h_orig;
+        $x2 = ($b[3] / 1000) * $w_orig;
+        $cw = max(2, $x2 - $x1);
+        $ch = max(2, $y2 - $y1);
+
+        $crop = imagecrop($img, ['x' => (int)$x1, 'y' => (int)$y1, 'width' => (int)$cw, 'height' => (int)$ch]);
         if ($crop) {
-            $fname = "img_" . ($i+1) . ".png";
-            imagepng($crop, $out.DIRECTORY_SEPARATOR.$fname);
-            $pls[] = [
+            $fname = "img_" . ($i + 1) . ".png";
+            imagepng($crop, $outDir . DIRECTORY_SEPARATOR . $fname);
+            $label = $item['label'] ?? "visual";
+            $placeholders[] = [
                 'box' => $b,
-                'md' => "![" . ($item['label']??"visual") . "]($rel/$fname)",
-                'desc' => $item['label']??"visual"
+                'md' => "![" . $label . "]($relDir/$fname)",
+                'desc' => $label
             ];
             imagedestroy($crop);
         }
     }
-    imagedestroy($gd);
-    return $pls;
+
+    imagedestroy($img);
+    return $placeholders;
 }
 
-function performOcr($path, $pls) {
+function performOcr(string $imagePath, array $placeholders): string
+{
     $ctx = "I have extracted visual elements. Use these tags at their locations:\n";
-    foreach ($pls as $p) $ctx .= "- Around [".implode(',',$p['box'])."]: {$p['md']}\n";
-    
-    $prompt = "Perform high-fidelity OCR to Markdown. $ctx\nMaintain structure (headers, tables). Insert visual tags logically. Use LaTeX for math. NO filler, ONLY Markdown.";
-    return sendRequest($prompt, [base64_encode(file_get_contents($path))], 0.1);
-}
-
-function assembleFullBook($base, $manifest) {
-    echo "Assembling full_book.md...\n";
-    $full = "# Full Book OCR\n\n";
-    foreach ($manifest as $page) {
-        $c = file_get_contents($page['file']);
-        // Correct image paths for the combined file
-        // From: (images/element_1.png) -> To: (page_name/images/element_1.png)
-        $c = preg_replace('/\((images\/.*?)\)/', "(" . $page['name'] . "/$1)", $c);
-        $full .= "## " . strtoupper($page['name']) . "\n\n" . $c . "\n\n---\n\n";
+    foreach ($placeholders as $p) {
+        $ctx .= "- Around [" . implode(',', $p['box']) . "]: {$p['md']}\n";
     }
-    file_put_contents($base . DIRECTORY_SEPARATOR . "full_book.md", $full);
+
+    $prompt = "Perform high-fidelity OCR to Markdown. $ctx\nMaintain structure (headers, tables). Insert visual tags logically. Use LaTeX for math. NO filler, ONLY Markdown.";
+
+    $imageContent = file_get_contents($imagePath);
+    if ($imageContent === false) {
+        die("Error: Could not read image: $imagePath\n");
+    }
+
+    return sendRequest($prompt, [base64_encode($imageContent)], 0.1);
 }
 
-function sendRequest($prompt, $imgs, $temp=0.2) {
-    $p = [
-        "model" => OLLAMA_MODEL,
-        "messages" => [["role" => "user", "content" => $prompt, "images" => $imgs]],
-        "stream" => false,
-        "options" => ["temperature" => $temp, "num_predict" => 4096]
-    ];
-    $ch = curl_init(OLLAMA_API_URL);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($p));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, TIMEOUT_SECONDS);
-    $r = curl_exec($ch);
-    $res = json_decode($r, true);
-    curl_close($ch);
-    return $res['message']['content'] ?? '';
+function processPage(string $imagePath, string $baseOutputDir, int $index): array
+{
+    $pageName = sprintf("page_%03d", $index + 1);
+    echo "Processing [$pageName]...";
+
+    $pageDir = $baseOutputDir . DIRECTORY_SEPARATOR . $pageName;
+    ensureDirectoryExists($pageDir);
+
+    $imgDir = $pageDir . DIRECTORY_SEPARATOR . "images";
+    ensureDirectoryExists($imgDir);
+
+    $mdFile = $pageDir . DIRECTORY_SEPARATOR . "index.md";
+
+    $grounding = detectVisuals($imagePath);
+    $placeholders = [];
+
+    if (!empty($grounding)) {
+        $placeholders = cropVisuals($imagePath, $grounding, $imgDir, "images");
+    }
+
+    $markdown = performOcr($imagePath, $placeholders);
+
+    if (file_put_contents($mdFile, $markdown) === false) {
+        die("Error: Could not write to file: $mdFile\n");
+    }
+
+    echo " OK\n";
+
+    return ['name' => $pageName, 'file' => $mdFile];
 }
+
+function assembleFullBook(string $baseOutputDir, array $manifest): void
+{
+    echo "Assembling full_book.md...\n";
+
+    $full = "# Full Book OCR\n\n";
+    $full .= "> Generated on: " . date('Y-m-d H:i:s') . "\n\n---\n\n";
+
+    foreach ($manifest as $page) {
+        $content = file_get_contents($page['file']);
+        if ($content === false) {
+            echo "Warning: Could not read file: {$page['file']}\n";
+            continue;
+        }
+
+        $content = preg_replace('/\((images\/.*?)\)/', "(" . $page['name'] . "/$1)", $content);
+        $full .= "## " . strtoupper($page['name']) . "\n\n" . $content . "\n\n---\n\n";
+    }
+
+    if (file_put_contents($baseOutputDir . DIRECTORY_SEPARATOR . "full_book.md", $full) === false) {
+        die("Error: Could not write full_book.md\n");
+    }
+}
+
+function cleanupTempFiles(string $tempDir): void
+{
+    echo "Cleaning up temporary PNG files...\n";
+
+    $files = glob($tempDir . "/*.png");
+    if ($files) {
+        foreach ($files as $file) {
+            unlink($file);
+        }
+    }
+
+    if (is_dir($tempDir)) {
+        rmdir($tempDir);
+    }
+}
+
+function runOcr(string $inputPath, string $baseOutputDir): void
+{
+    $tempDir = $baseOutputDir . DIRECTORY_SEPARATOR . "_internal_temp";
+    $input = findInputFiles($inputPath, $tempDir);
+    $pagesToProcess = $input['pages'];
+    $isTempDir = $input['isTempDir'];
+
+    $manifest = [];
+    echo "\nStarting OCR for " . count($pagesToProcess) . " pages...\n";
+
+    checkModelExists();
+    preloadModel();
+
+    foreach ($pagesToProcess as $index => $imagePath) {
+        try {
+            $result = processPage($imagePath, $baseOutputDir, $index);
+            $manifest[] = $result;
+        } catch (Exception $e) {
+            echo " FAILED: " . $e->getMessage() . "\n";
+        }
+    }
+
+    if (!empty($manifest)) {
+        assembleFullBook($baseOutputDir, $manifest);
+    }
+
+    if ($isTempDir) {
+        cleanupTempFiles($tempDir);
+    }
+
+    echo "\n*** COMPLETED SUCCESSFULLY ***\n";
+    echo "Final document: $baseOutputDir/full_book.md\n";
+}
+
+$args = validateArguments($argv);
+ensureDirectoryExists($args['baseOutputDir']);
+runOcr($args['inputPath'], $args['baseOutputDir']);
