@@ -5,7 +5,7 @@ if (php_sapi_name() !== 'cli') {
 }
 
 $ollama_server = getenv('OLLAMA_SERVER') ?: 'http://localhost:11434';
-$model = getenv('OLLAMA_MODEL') ?: 'qwen3-vl:235b-cloud'; // 'qwen3-vl:8b';
+$model = getenv('OLLAMA_MODEL') ?: 'qwen3.5:32b';
 
 /**
  * CLI script for OCR using Ollama (Qwen3-VL)

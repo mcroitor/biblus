@@ -11,7 +11,7 @@ if (php_sapi_name() !== 'cli') {
 
 define('OLLAMA_URL', getenv('OLLAMA_SERVER') ?: 'http://localhost:11434');
 define('OLLAMA_API_URL', OLLAMA_URL . '/api/chat');
-define('OLLAMA_MODEL', getenv('OLLAMA_MODEL') ?: 'deepseek-ocr:3b');
+define('OLLAMA_MODEL', getenv('OLLAMA_MODEL') ?: 'qwen3.5:32b');
 define('PDF_DPI', 300);
 define('TIMEOUT_SECONDS', 600);
 
@@ -105,7 +105,8 @@ function sendRequest(string $prompt, array $imgs, float $temp = 0.2): string
         "stream" => false,
         "options" => [
             "temperature" => $temp,
-            "num_predict" => 4096
+            "num_predict" => 4096,
+            "num_ctx" => 32768,
         ]
     ];
 
@@ -153,12 +154,12 @@ function convertPdfToPng(string $pdfPath, string $outDir): array
     foreach ($im as $i => $page) {
         $page->setImageFormat('png');
         $target = $outDir . DIRECTORY_SEPARATOR . sprintf("page_%03d.png", $i + 1);
-        
+
         if (!$page->writeImage($target)) {
             echo "\nWarning: Could not write $target\n";
             continue;
         }
-        
+
         $paths[] = $target;
         echo ".";
     }
@@ -205,7 +206,16 @@ function detectVisuals(string $imagePath): array
     }
 
     $imageData = base64_encode($imageContent);
-    $prompt = "Analyze the image. Identify images, diagrams, or charts. Return a JSON array of their [ymin, xmin, ymax, xmax] coordinates (0-1000) and descriptions. Output ONLY JSON. Format: [{\"box_2d\": [y1,x1,y2,x2], \"label\": \"description\"}]";
+    $prompt = "Identify all visual elements (diagrams, photos, charts, logos) in this image. 
+For each identified element, describe what it is and provide its bounding box coordinates.
+Use normalized coordinates from 0 to 1000.
+
+Return the result STRICTLY as a JSON array of objects:
+[
+  {\"box\": {\"ymin\": integer, \"xmin\": integer, \"ymax\": integer, \"xmax\": integer}, \"label\": \"string\"}
+]
+
+Do not include any other text or explanations.";
 
     $raw = sendRequest($prompt, [$imageData]);
 
@@ -213,7 +223,7 @@ function detectVisuals(string $imagePath): array
         $decoded = json_decode($matches[0], true);
         if (is_array($decoded) && !empty($decoded)) {
             foreach ($decoded as $item) {
-                if (!isset($item['box_2d']) || !is_array($item['box_2d']) || count($item['box_2d']) !== 4) {
+                if (!isset($item['box']) || !is_array($item['box']) || !isset($item['box']['ymin'], $item['box']['xmin'], $item['box']['ymax'], $item['box']['xmax'])) {
                     return [];
                 }
             }
@@ -242,15 +252,16 @@ function cropVisuals(string $sourcePath, array $info, string $outDir, string $re
     $placeholders = [];
 
     foreach ($info as $i => $item) {
-        if (!isset($item['box_2d']) || !is_array($item['box_2d']) || count($item['box_2d']) !== 4) {
+        if (!isset($item['box']) || !is_array($item['box']) || !isset($item['box']['ymin'], $item['box']['xmin'], $item['box']['ymax'], $item['box']['xmax'])) {
             continue;
         }
 
-        $b = $item['box_2d'];
-        $y1 = ($b[0] / 1000) * $h_orig;
-        $x1 = ($b[1] / 1000) * $w_orig;
-        $y2 = ($b[2] / 1000) * $h_orig;
-        $x2 = ($b[3] / 1000) * $w_orig;
+        $b = $item['box'];
+        $y1 = ($b['ymin'] / 1000) * $h_orig;
+        $x1 = ($b['xmin'] / 1000) * $w_orig;
+        $y2 = ($b['ymax'] / 1000) * $h_orig;
+        $x2 = ($b['xmax'] / 1000) * $w_orig;
+
         $cw = max(2, $x2 - $x1);
         $ch = max(2, $y2 - $y1);
 
@@ -276,7 +287,8 @@ function performOcr(string $imagePath, array $placeholders): string
 {
     $ctx = "I have extracted visual elements. Use these tags at their locations:\n";
     foreach ($placeholders as $p) {
-        $ctx .= "- Around [" . implode(',', $p['box']) . "]: {$p['md']}\n";
+        $box = $p['box'];
+        $ctx .= "- Around [ymin: {$box['ymin']}, xmin: {$box['xmin']}, ymax: {$box['ymax']}, xmax: {$box['xmax']}]: {$p['md']}\n";
     }
 
     $prompt = "Perform high-fidelity OCR to Markdown. $ctx\nMaintain structure (headers, tables). Insert visual tags logically. Use LaTeX for math. NO filler, ONLY Markdown.";
@@ -304,6 +316,9 @@ function processPage(string $imagePath, string $baseOutputDir, int $index): arra
 
     $grounding = detectVisuals($imagePath);
     $placeholders = [];
+
+    ensureDirectoryExists("logs");
+    file_put_contents("logs/grounding_$pageName.json", json_encode($grounding, JSON_PRETTY_PRINT));
 
     if (!empty($grounding)) {
         $placeholders = cropVisuals($imagePath, $grounding, $imgDir, "images");

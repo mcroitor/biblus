@@ -11,7 +11,7 @@ if (php_sapi_name() !== 'cli') {
 
 define('OLLAMA_URL', getenv('OLLAMA_SERVER') ?: 'http://localhost:11434');
 define('OLLAMA_API_URL', OLLAMA_URL . '/api/chat');
-define('OLLAMA_MODEL', getenv('OLLAMA_MODEL') ?: 'qwen3-vl:235b-cloud');
+define('OLLAMA_MODEL', getenv('OLLAMA_MODEL') ?: 'qwen3.5:32b');
 define('TIMEOUT_SECONDS', 600);
 
 function validateArguments(array $argv): array
@@ -155,15 +155,24 @@ function detectImagesAndCoordinates(string $imagePath): array
     }
     
     $imageData = base64_encode($imageContent);
-    $prompt = "Analyze this page. Identify all images, diagrams, or charts. Return a JSON array of their normalized [ymin, xmin, ymax, xmax] coordinates (0-1000) and labels. Output ONLY JSON. Format: [{\"box_2d\": [0,0,0,0], \"label\": \"description\"}]";
-    
+    $prompt = "Identify all visual elements (diagrams, photos, charts, logos) in this image. 
+For each identified element, describe what it is and provide its bounding box coordinates.
+Use normalized coordinates from 0 to 1000.
+
+Return the result STRICTLY as a JSON array of objects:
+[
+  {\"box\": {\"ymin\": integer, \"xmin\": integer, \"ymax\": integer, \"xmax\": integer}, \"label\": \"string\"}
+]
+
+Do not include any other text or explanations.";
+
     $response = sendOllamaRequest($prompt, [$imageData]);
     
     if (preg_match('/(\[\s*\[.*\]\s*\]|\[\s*\{.*\}\s*\])/s', $response, $matches)) {
         $decoded = json_decode($matches[0], true);
         if (is_array($decoded) && !empty($decoded)) {
             foreach ($decoded as $item) {
-                if (!isset($item['box_2d']) || !is_array($item['box_2d']) || count($item['box_2d']) !== 4) {
+                if (!isset($item['box']) || !is_array($item['box']) || !isset($item['box']['ymin'], $item['box']['xmin'], $item['box']['ymax'], $item['box']['xmax'])) {
                     return [];
                 }
             }
@@ -192,15 +201,15 @@ function cropImagesAndGetPlaceholders(string $sourcePath, array $info, string $o
     $placeholders = [];
     
     foreach ($info as $i => $item) {
-        if (!isset($item['box_2d']) || !is_array($item['box_2d']) || count($item['box_2d']) !== 4) {
+        if (!isset($item['box']) || !is_array($item['box']) || count($item['box']) !== 4) {
             continue;
         }
         
-        $b = $item['box_2d'];
-        $y1 = ($b[0] / 1000) * $h_orig;
-        $x1 = ($b[1] / 1000) * $w_orig;
-        $y2 = ($b[2] / 1000) * $h_orig;
-        $x2 = ($b[3] / 1000) * $w_orig;
+        $b = $item['box'];
+        $y1 = ($b['ymin'] / 1000) * $h_orig;
+        $x1 = ($b['xmin'] / 1000) * $w_orig;
+        $y2 = ($b['ymax'] / 1000) * $h_orig;
+        $x2 = ($b['xmax'] / 1000) * $w_orig;
         $cw = max(1, $x2 - $x1);
         $ch = max(1, $y2 - $y1);
         $name = "img_" . ($i + 1) . ".png";
