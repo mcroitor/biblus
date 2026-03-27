@@ -62,6 +62,20 @@ Arguments::Set([
         'required' => false,
         'default' => 300
     ],
+    'first-page' => [
+        'short' => 'f',
+        'long' => 'first-page',
+        'description' => 'First page to process (1-based index)',
+        'required' => false,
+        'default' => 1
+    ],
+    'last-page' => [
+        'short' => 'l',
+        'long' => 'last-page',
+        'description' => 'Last page to process (1-based index)',
+        'required' => false,
+        'default' => 0
+    ],
     'all' => [
         'short' => 'a',
         'long' => 'all',
@@ -91,7 +105,7 @@ Arguments::Set([
 //        'default' => false
     ],
     'format-markdown' => [
-        'short' => 'f',
+        'short' => 'm',
         'long' => 'format-markdown',
         'description' => 'Whether to format markdown with LLM',
         'required' => false,
@@ -120,6 +134,8 @@ $server = Arguments::GetValue('ollama-server');
 $ocrModel = Arguments::GetValue('ollama-ocr-model');
 $imgModel = Arguments::GetValue('ollama-img-model');
 $dpi = (int) Arguments::GetValue('dpi');
+$firstPage = (int) Arguments::GetValue('first-page');
+$lastPage = (int)Arguments::GetValue('last-page');
 
 if(empty($inputPath)) {
     Logger::Stdout()->Error("Error: Input path is required.");
@@ -161,7 +177,7 @@ foreach ([$pagesDir, $visualsDir, $ocrDir, $markdownDir] as $dir) {
 
 if ($steps['explode-pdf'] && $isPdf) {
     Logger::Stdout()->Info("Step: Exploding PDF to pages (DPI: {$dpi})...");
-    $explodeWorker = new ExplodePdfWorker('imagick', ExplodePdfWorker::PNG, $dpi);
+    $explodeWorker = new ExplodePdfWorker(ExplodePdfWorker::PNG, $dpi);
     $pages = $explodeWorker->Execute($inputPath, $pagesDir);
     Logger::Stdout()->Info("Extracted " . count($pages) . " pages.");
 } elseif (is_dir($inputPath)) {
@@ -183,6 +199,21 @@ if (empty($pageFiles)) {
     Logger::Stdout()->Error("No pages found to process.");
     exit(1);
 }
+
+if($lastPage == 0) {
+    $lastPage = count($pageFiles);
+}
+
+$firstPage = max(1, $firstPage);
+$lastPage = min(count($pageFiles), $lastPage);
+if ($firstPage > $lastPage) {
+    $tmp = $firstPage;
+    $firstPage = $lastPage;
+    $lastPage = $tmp;
+}
+
+$pageFiles = array_slice($pageFiles, $firstPage - 1, $lastPage - $firstPage + 1);
+Logger::Stdout()->Info("Processing pages from $firstPage to $lastPage...");
 
 $imageResults = [];
 $markdownResults = [];
