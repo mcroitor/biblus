@@ -1,2 +1,21 @@
 # ignore uploads directory where uploaded files are stored
 ./uploads/
+
+# composer
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store/
+Thumbs.db
+
+# Temp
+/temp/
+/tmp/
+
+# Tests
+/tests/output/
+/tests/.phpunit.cache/

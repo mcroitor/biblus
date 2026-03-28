@@ -2,11 +2,11 @@
 
 namespace Worker;
 
-use Core\Mc\Alpaca\OllamaClient;
+use Core\Mc\Alpaca\LLMClient;
 use Core\Mc\Logger;
 
 class TextDetectWorker {
-    private OllamaClient $client;
+    private LLMClient $client;
     private int $timeout;
     private int $maxRetries;
     private array $modelOptions;
@@ -16,9 +16,10 @@ class TextDetectWorker {
         string $model,
         array $modelOptions = [],
         int $timeout = 600,
-        int $maxRetries = 2
+        int $maxRetries = 2,
+        ?LLMClient $client = null
     ) {
-        $this->client = new OllamaClient($ollamaUrl, $model);
+        $this->client = $client ?? new \Core\Mc\Alpaca\OllamaClient($ollamaUrl, $model);
         $this->timeout = $timeout;
         $this->maxRetries = $maxRetries;
         $this->modelOptions = array_merge([

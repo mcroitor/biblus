@@ -2,10 +2,10 @@
 
 namespace Worker;
 
-use Core\Mc\Alpaca\OllamaClient;
+use Core\Mc\Alpaca\LLMClient;
 
 class ImageDetectWorker {
-    private OllamaClient $client;
+    private LLMClient $client;
     private int $timeout;
     private array $modelOptions;
 
@@ -13,9 +13,10 @@ class ImageDetectWorker {
         string $ollamaUrl,
         string $model,
         array $modelOptions = [],
-        int $timeout = 600
+        int $timeout = 600,
+        ?LLMClient $client = null
     ) {
-        $this->client = new OllamaClient($ollamaUrl, $model);
+        $this->client = $client ?? new \Core\Mc\Alpaca\OllamaClient($ollamaUrl, $model);
         $this->timeout = $timeout;
         $this->modelOptions = array_merge([
             'temperature' => 0.2,

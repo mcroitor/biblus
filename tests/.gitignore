@@ -1,0 +1,4 @@
+output/
+.phpunit.cache/
+*.md
+!README.md

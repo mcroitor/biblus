@@ -63,6 +63,19 @@ output_dir/
 
 For OCR can be used `deepseek-ocr` or `qwen3-vl`. For common usage `qwen3.5` is a good solution.
 
+## Testing
+
+```bash
+# Install dependencies
+composer install
+
+# Run tests with mocks (default)
+./vendor/bin/phpunit tests
+
+# Run tests with real Ollama server
+OLLAMA_MODE=real ./vendor/bin/phpunit tests
+```
+
 ## License
 
 GNU GPL 3.0

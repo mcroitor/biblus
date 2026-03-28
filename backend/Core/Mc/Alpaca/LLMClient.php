@@ -42,6 +42,59 @@ interface LLMClient {
     public function GetApiUrl(): string;
     
     /**
+     * Get the model name
+     * 
+     * @return string The model name
+     */
+    public function GetModelName(): string;
+    
+    /**
+     * Set the model name
+     * 
+     * @param string $modelName The model name to use
+     */
+    public function SetModelName(string $modelName): void;
+    
+    /**
+     * Set a request option
+     * 
+     * @param string $option The option name
+     * @param string $value The option value
+     */
+    public function SetRequestOption(string $option, string $value): void;
+    
+    /**
+     * Set model options
+     * 
+     * @param array $options Model tuning options (temperature, num_ctx, etc.)
+     */
+    public function SetModelOptions(array $options): void;
+    
+    /**
+     * Get list of available models
+     * 
+     * @return array Array of model names
+     */
+    public function GetModelsList(): array;
+    
+    /**
+     * Get detailed model information
+     * 
+     * @param string $modelName The model name to query
+     * @return array Model information
+     */
+    public function GetModelInfo(string $modelName): array;
+    
+    /**
+     * Send a generic prompt request to a specific endpoint
+     * 
+     * @param string $endpoint The API endpoint
+     * @param array $data The request data
+     * @return string Raw response
+     */
+    public function Prompt(string $endpoint, array $data);
+    
+    /**
      * Generate text response from the language model
      * 
      * This is the core method for interacting with the LLM.
