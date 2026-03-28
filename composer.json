@@ -1,0 +1,25 @@
+{
+    "name": "biblus/pdf-to-markdown",
+    "description": "PDF to Markdown Converter with AI agents",
+    "type": "project",
+    "require": {
+        "php": ">=8.4"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0 || ^11.0"
+    },
+    "autoload": {
+        "classmap": [
+            "backend/"
+        ]
+    },
+    "autoload-dev": {
+        "classmap": [
+            "tests/"
+        ]
+    },
+    "scripts": {
+        "test": "phpunit",
+        "test:real": "OLLAMA_MODE=real phpunit"
+    }
+}

@@ -20,9 +20,16 @@ class Arguments
     private static $args = [];
     private static $values = [];
 
+    /**
+     * Проверяет, что все обязательные аргументы присутствуют и не равны null.
+     * Выбрасывает исключение, если какой-либо обязательный аргумент отсутствует.
+     * @throws \InvalidArgumentException
+     */
+
     public static function Set($arguments)
     {
         self::$args = $arguments;
+        self::$values = [];
         foreach ($arguments as $name => $def) {
             self::$values[$name] = $def['default'] ?? null;
         }
@@ -112,16 +119,47 @@ class Arguments
         return null;
     }
 
+    public static function GetRequiredArguments()
+    {
+        $required = [];
+        foreach (self::$args as $name => $def) {
+            if (!empty($def['required'])) {
+                $required[] = $name;
+            }
+        }
+        return $required;
+    }
+
+    public static function ValidateRequired(array $result) {
+        $required = self::GetRequiredArguments();
+        foreach ($required as $requiredArg) {
+            $shortOpt = self::$args[$requiredArg]['short'] ?? null;
+            $longOpt = self::$args[$requiredArg]['long'] ?? null;
+            if (($shortOpt && !isset($result[$shortOpt])) && ($longOpt && !isset($result[$longOpt]))) {
+                throw new \InvalidArgumentException("Missing required argument: {$requiredArg}");
+            }
+        }
+    }
+
     public static function Parse()
     {
         $shortOpts = self::ShortOptions();
         $longOpts = self::LongOptions();
         $result = getopt($shortOpts, $longOpts);
 
+        try {
+            self::ValidateRequired($result);
+        }
+        catch (\InvalidArgumentException $e) {
+            echo "Error: " . $e->getMessage() . "\n";
+            echo self::Help();
+            exit(1);
+        }
+
         foreach ($result as $key => $value) {
             $argName = self::GetArgumentName($key);
             if ($argName !== null) {
-                self::$values[$argName] = empty($value) ? true : $value;
+                self::$values[$argName] = ($value !== false) ? $value : true;
             }
         }
         return $result;

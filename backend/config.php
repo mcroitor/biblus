@@ -28,7 +28,7 @@ class Config
     public static function Init()
     {
         self::$ollamaServer = getenv('OLLAMA_SERVER') ?: 'http://localhost:11434';
-        self::$ollamaOcrModel = getenv('OLLAMA_OCR_MODEL') ?: 'qwen3.5:8b';
+        self::$ollamaOcrModel = getenv('OLLAMA_OCR_MODEL') ?: 'qwen3.5:9b';
         self::$ollamaImgModel = getenv('OLLAMA_IMG_MODEL') ?: 'qwen3.5:32b';
         self::$imageFormat = getenv('IMAGE_FORMAT') ?: 'png';
         self::$imageDpi = getenv('IMAGE_DPI') ?: 300;

@@ -2,10 +2,10 @@
 
 namespace Worker;
 
-use Core\Mc\Alpaca\OllamaClient;
+use Core\Mc\Alpaca\LLMClient;
 
 class ValidateDataWorker {
-    private OllamaClient $client;
+    private LLMClient $client;
     private int $maxRetries;
     private array $modelOptions;
 
@@ -13,9 +13,10 @@ class ValidateDataWorker {
         string $ollamaUrl,
         string $model,
         array $modelOptions = [],
-        int $maxRetries = 2
+        int $maxRetries = 2,
+        ?LLMClient $client = null
     ) {
-        $this->client = new OllamaClient($ollamaUrl, $model);
+        $this->client = $client ?? new \Core\Mc\Alpaca\OllamaClient($ollamaUrl, $model);
         $this->maxRetries = $maxRetries;
         $this->modelOptions = array_merge([
             'temperature' => 0.1,
