@@ -49,6 +49,7 @@ class ExplodePdfWorker
             $path = $outputDir . DIRECTORY_SEPARATOR . sprintf("page_%03d.png", $i + 1);
             if (file_exists($path)){
                 echo ".";
+                $paths[] = $path;
                 continue;
             }
         
