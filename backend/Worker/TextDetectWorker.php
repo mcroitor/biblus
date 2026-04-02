@@ -25,7 +25,6 @@ class TextDetectWorker {
             'num_predict' => 4096
         ], $modelOptions);
         $this->client->SetModelOptions($this->modelOptions);
-        \Core\Mc\Alpaca\OllamaClient::SetRequestTimeout($timeout);
     }
 
     public function Execute(string $pagesDir, string $outputDir): array {
