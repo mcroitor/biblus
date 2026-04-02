@@ -19,3 +19,5 @@ Thumbs.db
 # Tests
 /tests/output/
 /tests/.phpunit.cache/
+
+.env

@@ -14,6 +14,7 @@ class Config
     public static $ollamaServer;
     public static $ollamaOcrModel;
     public static $ollamaImgModel;
+    public static $ollamaCheckerModel;
     public static $ollamaModelOptions = [
         'temperature' => 0.2,
         'max_tokens' => 2048,
@@ -28,8 +29,9 @@ class Config
     public static function Init()
     {
         self::$ollamaServer = getenv('OLLAMA_SERVER') ?: 'http://localhost:11434';
-        self::$ollamaOcrModel = getenv('OLLAMA_OCR_MODEL') ?: 'qwen3.5:9b';
-        self::$ollamaImgModel = getenv('OLLAMA_IMG_MODEL') ?: 'qwen3.5:32b';
+        self::$ollamaOcrModel = getenv('OLLAMA_OCR_MODEL') ?: 'qwen3-vl:8b';
+        self::$ollamaImgModel = getenv('OLLAMA_IMG_MODEL') ?: 'qwen3-vl:8b';
+        self::$ollamaCheckerModel = getenv('OLLAMA_CHECKER_MODEL') ?: 'qwen3:14b';
         self::$imageFormat = getenv('IMAGE_FORMAT') ?: 'png';
         self::$imageDpi = getenv('IMAGE_DPI') ?: 300;
     }

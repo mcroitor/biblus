@@ -56,6 +56,7 @@ class OllamaClient implements LLMClient
      * @var array
      */
     private array $options = [];
+    private static int $requestTimeout = 60; // default timeout for API requests in seconds
 
     /**
      * Initialize the Ollama client
@@ -135,6 +136,7 @@ class OllamaClient implements LLMClient
     private static function GetHttpClient(string $uri, string &$buffer, array $options = []): Http
     {
         $http = new Http($uri);
+        $http->SetOption(CURLOPT_TIMEOUT, $options['timeout'] ?? self::$requestTimeout);
         $http->SetEncoder("json_encode");
         $http->SetWriteFunction(function ($curl, $data) use (&$buffer, $options): int {
             if ($options['stream'] ?? false) {
@@ -305,5 +307,8 @@ class OllamaClient implements LLMClient
      */
     public function SetModelOptions(array $options): void {
         $this->options["options"] = $options;
+    }
+    public static function SetRequestTimeout(int $timeout): void {
+        self::$requestTimeout = $timeout;
     }
 }

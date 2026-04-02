@@ -24,6 +24,71 @@ use \Core\Mc\Logger;
 use \Core\Mc\Alpaca\OllamaClient;
 use \Worker\ExplodePdfWorker;
 
+// ---------- Functions ----------
+/**
+ * Extracts image fragments based on <image> tags in the text
+ * @param string $sourcePath Path to the source PNG
+ * @param string $ocrMarkdown Text obtained from LLM
+ * @param string $outputFolder Folder to save the extracted fragments
+ * @return array List of created files and their corresponding tags
+ */
+function extractVisualsWithImagick(string $sourcePath, string $ocrMarkdown, string $outputFolder): array
+{
+    if (!file_exists($sourcePath)) return [];
+
+    $im = new Imagick($sourcePath);
+    $width = $im->getImageWidth();
+    $height = $im->getImageHeight();
+    
+    // Regex for <image>[ymin, xmin, ymax, xmax](label)</image>
+    $pattern = '/<image>\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]\((.*?)\)<\/image>/i';
+    preg_match_all($pattern, $ocrMarkdown, $matches, PREG_SET_ORDER);
+
+    $extractedFiles = [];
+
+    foreach ($matches as $index => $match) {
+        // $match[1] = ymin, [2] = xmin, [3] = ymax, [4] = xmax, [5] = label
+        $ymin = (int)$match[1];
+        $xmin = (int)$match[2];
+        $ymax = (int)$match[3];
+        $xmax = (int)$match[4];
+        $label = $match[5] ?: "visual";
+
+        // Translate from 0-1000 to pixels
+        $realX = ($xmin / 1000) * $width;
+        $realY = ($ymin / 1000) * $height;
+        $realW = (($xmax - $xmin) / 1000) * $width;
+        $realH = (($ymax - $ymin) / 1000) * $height;
+
+        // Clone the main object to avoid modifying the original during cropping
+        $crop = clone $im;
+        
+        // cropImage(width, height, x, y)
+        $crop->cropImage((int)$realW, (int)$realH, (int)$realX, (int)$realY);
+        $crop->setImageFormat("png");
+
+        $fileName = sprintf("visual_%03d_%s.png", $index + 1, preg_replace('/[^a-z0-9]/i', '_', $label));
+        $fullPath = $outputFolder . DIRECTORY_SEPARATOR . $fileName;
+        
+        if ($crop->writeImage($fullPath)) {
+            $extractedFiles[] = [
+                'tag' => $match[0],
+                'path' => $fullPath,
+                'name' => $fileName
+            ];
+        }
+        
+        $crop->clear();
+        $crop->destroy();
+    }
+
+    $im->clear();
+    $im->destroy();
+
+    return $extractedFiles;
+}
+// ---------- Main Script ----------
+
 Arguments::Set([
     'help' => [
         'short' => 'h',
