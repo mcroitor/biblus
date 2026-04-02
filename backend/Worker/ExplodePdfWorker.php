@@ -46,7 +46,7 @@ class ExplodePdfWorker
 
         $paths = [];
         for ($i = 0; $i < $count; $i++) {
-            $path = $outputDir . DIRECTORY_SEPARATOR . sprintf("page_%03d.png", $i + 1);
+            $path = $outputDir . DIRECTORY_SEPARATOR . sprintf("page_%03d.%s", $i + 1, $this->format);
             if (file_exists($path)){
                 echo ".";
                 $paths[] = $path;
@@ -54,9 +54,9 @@ class ExplodePdfWorker
             }
         
             $page = new \Imagick();
-            $page->setResolution(300, 300);
+            $page->setResolution($this->dpi, $this->dpi);
             $page->readImage($pdfPath . "[" . $i . "]");
-            $page->setImageFormat('png');
+            $page->setImageFormat($this->format);
             $page->setImageAlphaChannel(\Imagick::ALPHACHANNEL_REMOVE);
             $page->writeImage($path);
             $page->clear();
