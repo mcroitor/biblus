@@ -41,7 +41,7 @@ class ExplodePdfWorker
 
         $pdf = new \Imagick();
         $pdf->setResolution($this->dpi, $this->dpi);
-        $pdf->readImage($pdfPath);
+        $pdf->pingImage($pdfPath);
         $count = $pdf->getNumberImages();
 
         $paths = [];
