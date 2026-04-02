@@ -55,6 +55,13 @@ Arguments::Set([
         'required' => false,
         'default' => Config::$ollamaImgModel
     ],
+    'ollama-checker-model' => [
+        'short' => null,
+        'long' => 'ollama-checker-model',
+        'description' => 'Ollama model for checking and validation results',
+        'required' => false,
+        'default' => Config::$ollamaCheckerModel
+    ],
     'dpi' => [
         'short' => null,
         'long' => 'dpi',
@@ -133,6 +140,7 @@ $outputDir = Arguments::GetValue('output-dir');
 $server = Arguments::GetValue('ollama-server');
 $ocrModel = Arguments::GetValue('ollama-ocr-model');
 $imgModel = Arguments::GetValue('ollama-img-model');
+$checkerModel = Arguments::GetValue('ollama-checker-model');
 $dpi = (int) Arguments::GetValue('dpi');
 $firstPage = (int) Arguments::GetValue('first-page');
 $lastPage = (int)Arguments::GetValue('last-page');
@@ -165,11 +173,12 @@ if (!is_dir($outputDir)) {
 $isPdf = is_file($inputPath) && strtolower(pathinfo($inputPath, PATHINFO_EXTENSION)) === 'pdf';
 $tempDir = $outputDir . DIRECTORY_SEPARATOR . '_temp';
 $pagesDir = $tempDir . DIRECTORY_SEPARATOR . 'pages';
+$selectedPagesDir = $tempDir . DIRECTORY_SEPARATOR . 'selected_pages';
 $visualsDir = $tempDir . DIRECTORY_SEPARATOR . 'visuals';
 $ocrDir = $tempDir . DIRECTORY_SEPARATOR . 'ocr';
 $markdownDir = $tempDir . DIRECTORY_SEPARATOR . 'markdown';
 
-foreach ([$pagesDir, $visualsDir, $ocrDir, $markdownDir] as $dir) {
+foreach ([$pagesDir, $selectedPagesDir, $visualsDir, $ocrDir, $markdownDir] as $dir) {
     if (!is_dir($dir)) {
         mkdir($dir, 0755, true);
     }
@@ -184,6 +193,7 @@ if ($steps['explode-pdf'] && $isPdf) {
     Logger::Stdout()->Info("Step: Copying pages from input directory...");
     $files = glob($inputPath . DIRECTORY_SEPARATOR . "*.png");
     natsort($files);
+    $files = array_values($files);
     foreach ($files as $index => $file) {
         $pageName = sprintf("page_%03d", $index + 1);
         copy($file, $pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png');
@@ -212,8 +222,18 @@ if ($firstPage > $lastPage) {
     $lastPage = $tmp;
 }
 
-$pageFiles = array_slice($pageFiles, $firstPage - 1, $lastPage - $firstPage + 1);
+$pageFiles = array_values(array_slice($pageFiles, $firstPage - 1, $lastPage - $firstPage + 1));
 Logger::Stdout()->Info("Processing pages from $firstPage to $lastPage...");
+
+$selectedPages = glob($selectedPagesDir . DIRECTORY_SEPARATOR . "*.png");
+foreach ($selectedPages as $selectedPage) {
+    unlink($selectedPage);
+}
+
+foreach ($pageFiles as $pageFile) {
+    $targetFile = $selectedPagesDir . DIRECTORY_SEPARATOR . basename($pageFile);
+    copy($pageFile, $targetFile);
+}
 
 $imageResults = [];
 $markdownResults = [];
@@ -221,19 +241,19 @@ $markdownResults = [];
 if ($steps['extract-pictures']) {
     Logger::Stdout()->Info("Step: Detecting and extracting pictures...");
     $imageWorker = new ImageDetectWorker($server, $imgModel);
-    $imageResults = $imageWorker->Execute($pagesDir, $visualsDir);
+    $imageResults = $imageWorker->Execute($selectedPagesDir, $visualsDir);
 }
 
 if ($steps['extract-text']) {
     Logger::Stdout()->Info("Step: Extracting text (OCR)...");
     $ocrWorker = new TextDetectWorker($server, $ocrModel);
-    $ocrWorker->Execute($pagesDir, $ocrDir);
+    $ocrWorker->Execute($selectedPagesDir, $ocrDir);
 }
 
 if ($steps['format-markdown']) {
     Logger::Stdout()->Info("Step: Formatting markdown...");
-    $formatWorker = new FormatMarkdownWorker($server, $ocrModel);
-    $markdownResults = $formatWorker->Execute($pagesDir, $ocrDir, $imageResults, $markdownDir);
+    $formatWorker = new FormatMarkdownWorker($server, $checkerModel);
+    $markdownResults = $formatWorker->Execute($selectedPagesDir, $ocrDir, $imageResults, $markdownDir);
 }
 
 if ($steps['compile-document']) {
@@ -242,28 +262,28 @@ if ($steps['compile-document']) {
     $compileWorker->Execute($markdownResults, $outputDir . DIRECTORY_SEPARATOR . 'full_book.md', $tempDir);
 }
 
-$hasWork = $steps['extract-pictures'] || $steps['extract-text'] || $steps['format-markdown'] || $steps['compile-document'];
+$hasWork = $steps['explode-pdf'] || $steps['extract-pictures'] || $steps['extract-text'] || $steps['format-markdown'] || $steps['compile-document'];
 if (!$hasWork) {
     Logger::Stdout()->Info("No processing steps enabled. Use --all or specific flags.");
     Logger::Stdout()->Info("Available steps: --explode-pdf, --extract-text, --extract-pictures, --format-markdown, --compile-document");
     exit(0);
 }
 
-Logger::Stdout()->Info("Cleaning up temporary files...");
-if ($isPdf && !$steps['explode-pdf']) {
-    array_map('unlink', glob("$pagesDir/*"));
-}
-foreach ([$visualsDir, $ocrDir, $markdownDir] as $dir) {
-    if (is_dir($dir)) {
-        $subdirs = glob("$dir/*", GLOB_ONLYDIR);
-        foreach ($subdirs as $subdir) {
-            array_map('unlink', glob("$subdir/*"));
-            rmdir($subdir);
-        }
-        array_map('unlink', glob("$dir/*"));
-        rmdir($dir);
-    }
-}
+// Logger::Stdout()->Info("Cleaning up temporary files...");
+// if ($isPdf && !$steps['explode-pdf']) {
+//     array_map('unlink', glob("$pagesDir/*"));
+// }
+// foreach ([$visualsDir, $ocrDir, $markdownDir] as $dir) {
+//     if (is_dir($dir)) {
+//         $subdirs = glob("$dir/*", GLOB_ONLYDIR);
+//         foreach ($subdirs as $subdir) {
+//             array_map('unlink', glob("$subdir/*"));
+//             rmdir($subdir);
+//         }
+//         array_map('unlink', glob("$dir/*"));
+//         rmdir($dir);
+//     }
+// }
 // rmdir($tempDir);
 
 Logger::Stdout()->Info("*** COMPLETED SUCCESSFULLY ***");

@@ -7,7 +7,6 @@ use Core\Mc\Logger;
 
 class TextDetectWorker {
     private LLMClient $client;
-    private int $timeout;
     private int $maxRetries;
     private array $modelOptions;
 
@@ -20,13 +19,13 @@ class TextDetectWorker {
         ?LLMClient $client = null
     ) {
         $this->client = $client ?? new \Core\Mc\Alpaca\OllamaClient($ollamaUrl, $model);
-        $this->timeout = $timeout;
         $this->maxRetries = $maxRetries;
         $this->modelOptions = array_merge([
             'temperature' => 0.2,
             'num_predict' => 4096
         ], $modelOptions);
         $this->client->SetModelOptions($this->modelOptions);
+        \Core\Mc\Alpaca\OllamaClient::SetRequestTimeout($timeout);
     }
 
     public function Execute(string $pagesDir, string $outputDir): array {
@@ -69,7 +68,25 @@ class TextDetectWorker {
         }
 
         $imageData = base64_encode($imageContent);
-        $prompt = "Act as a professional OCR engine. Extract all text from the attached image and format it into a clean, structured Markdown document. Use headers, lists, and tables where applicable. Use LaTeX for math. Return ONLY the Markdown content without any conversational filler.";
+        $prompt = "Act as an expert Document AI and OCR engine. Your goal is to transform the provided image into a high-fidelity Markdown document with precise visual grounding.
+
+### GUIDELINES:
+1.  **Text Extraction**: Recognize all text with 100% accuracy. Maintain the original document flow.
+2.  **Formatting**: 
+    - Use Markdown headers (#, ##) for titles. 
+    - Use | tables | for tabular data. 
+    - Use [ ] for checkboxes if present.
+3.  **Visual Grounding (CRITICAL)**: 
+    - Whenever you encounter a non-text element (diagram, photo, chess board, logo), insert a tag:
+      <image>[ymin, xmin, ymax, xmax](label)</image>
+    - Coordinates MUST be normalized to a 0-1000 scale.
+    - [ymin, xmin] is the top-left corner, [ymax, xmax] is the bottom-right.
+    - Place the tag exactly where the image sits in the flow of text.
+
+### CONSTRAINTS:
+- DO NOT use your internal coordinate tokens like <|box_start|>.
+- DO NOT provide descriptions of the page or conversational filler.
+- RETURN ONLY the raw Markdown content.";
 
         $response = $this->sendOcrRequest($prompt, [$imageData]);
         
