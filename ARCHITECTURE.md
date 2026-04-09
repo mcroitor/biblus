@@ -14,7 +14,8 @@ PDF/Directory → [ExplodePdfWorker] → [TextDetectWorker] → [ImageDetectWork
 2. **TextDetectWorker** - Extract text from each page using OCR (Ollama LLM)
 3. **ImageDetectWorker** - Detect and extract visual elements (diagrams, photos, charts)
 4. **FormatMarkdownWorker** - Format extracted text and images as Markdown
-5. **CompileDocumentWorker** - Combine all pages into a single Markdown document
+5. **TranslateWorker** - Optional stage to translate text to another language using LLM
+6. **CompileDocumentWorker** - Combine all pages into a single Markdown document
 
 ## Workers
 
@@ -23,6 +24,8 @@ All Workers follow a common pattern:
 - Constructor accepts `ollamaUrl`, `model`, optional `modelOptions`, optional `client`
 - `Execute()` method performs the main processing
 - Dependency injection via optional `LLMClient` parameter for testing
+
+> **Note:** `ValidateDataWorker` exists in the codebase but is not integrated into the main pipeline (`omnibus_ocr.php`) yet.
 
 ### ExplodePdfWorker
 
@@ -113,6 +116,48 @@ $results = $worker->Execute(
 ]
 ```
 
+### TranslateWorker
+
+Translates Markdown files to another language using Ollama LLM.
+
+```php
+$worker = new TranslateWorker(
+    string $ollamaUrl,
+    string $model,
+    array $modelOptions = [],
+    int $timeout = 600,
+    ?LLMClient $client = null
+);
+$results = $worker->Execute(
+    string $markdownDir,
+    string $outputDir,
+    string $targetLanguage
+): array;
+```
+
+### ValidateDataWorker
+
+Validates OCR and image detection results for each page. Checks that extracted text is non-empty and optionally cross-validates against the original page image using the LLM.
+
+```php
+$worker = new ValidateDataWorker(
+    string $ollamaUrl,
+    string $model,
+    array $modelOptions = [],
+    int $maxRetries = 2,
+    ?LLMClient $client = null
+);
+$results = $worker->Execute(string $pagesDir, array $ocrResults, array $imageResults): array;
+```
+
+**Output:** Array of per-page validation results:
+
+```php
+[
+    ['page' => 'page_001', 'ocrFile' => '/path/to/page_001.txt', 'imageResult' => [...], 'isValid' => true]
+]
+```
+
 ### CompileDocumentWorker
 
 Combines all page Markdown files into a single document.
@@ -120,13 +165,14 @@ Combines all page Markdown files into a single document.
 ```php
 $worker = new CompileDocumentWorker(
     string $title = 'Document',
-    bool $withTableOfContents = false,
-    bool $imagePathCorrection = false
+    string $imagePathCorrection = ''
 );
-$worker->Execute(array $markdownResults, string $outputFile, string $tempDir);
+$outputPath = $worker->Execute(array $markdownFiles, string $outputPath, ?string $baseOutputDir = null): string;
+// OR with table of contents:
+$outputPath = $worker->compileWithTableOfContents(array $markdownFiles, string $outputPath, ?string $baseOutputDir = null): string;
 ```
 
-**Output:** Single Markdown file with optional table of contents
+**Output:** Single Markdown file; use `compileWithTableOfContents()` to add a table of contents
 
 ## CLI Scripts
 
@@ -138,20 +184,21 @@ Complete pipeline runner supporting all stages.
 php omnibus_ocr.php --input <pdf_or_dir> [options]
 
 Options:
-  -i, --input              Path to input PDF file or directory with PNG images
-  -o, --output-dir         Path to the output directory (default: book_export)
-      --ollama-server      Ollama server URL (default: http://localhost:11434)
-      --ollama-ocr-model   Ollama OCR model name (default: qwen3.5:9b)
-      --ollama-img-model   Ollama model for image analysis (default: qwen3.5:32b)
-      --dpi                DPI for PDF rendering (default: 300)
-  -f, --first-page         First page to process (1-based, default: 1)
-  -l, --last-page          Last page to process (0 = all, default: 0)
-  -a, --all                Run all steps
-  -e, --explode-pdf        Explode PDF pages to images
-  -t, --extract-text       Perform OCR text extraction
-  -p, --extract-pictures   Extract pictures from pages
-  -m, --format-markdown    Format markdown with LLM
-  -c, --compile-document   Compile final document
+  -i, --input                  Path to input PDF file or directory with PNG images
+  -o, --output-dir             Path to the output directory (default: book_export)
+      --ollama-server          Ollama server URL (default: http://localhost:11434)
+      --ollama-ocr-model       Ollama OCR model name (default: qwen3-vl:8b)
+      --ollama-img-model       Ollama model for image analysis (default: qwen3-vl:8b)
+      --ollama-checker-model   Ollama model for validation (default: qwen3:14b)
+      --dpi                    DPI for PDF rendering (default: 300)
+  -f, --first-page             First page to process (1-based, default: 1)
+  -l, --last-page              Last page to process (0 = all, default: 0)
+  -a, --all                    Run all steps
+  -e, --explode-pdf            Explode PDF pages to images
+  -t, --extract-text           Perform OCR text extraction
+  -p, --extract-pictures       Extract pictures from pages
+  -m, --format-markdown        Format markdown with LLM
+  -c, --compile-document       Compile final document
 ```
 
 **Steps:**
@@ -170,6 +217,18 @@ Processes pre-rendered PNG pages (skips ExplodePdfWorker step).
 ### ocr.php
 
 Simple OCR-only pipeline without image extraction.
+
+### gemini_ocr.php
+
+Batch OCR pipeline using the Gemini API (not Ollama). Processes PDF or PNG pages via `gemini-2.5-flash`, extracts text and image bounding boxes, outputs Markdown per page.
+
+### gemini_ocr_paid.php
+
+Pro edition of the Gemini pipeline with resume capability, cost estimation, and 429 rate-limit handling. Same model and prompt strategy as `gemini_ocr.php`.
+
+### markdown_clean.php
+
+Post-processing script that cleans up OCR Markdown output using an Ollama LLM. Accepts a single Markdown file (`--input`) and writes a cleaned version (`--output`). Uses a specialized prompt for chess book formatting: de-hyphenation, paragraph merging, chess notation correction, LaTeX wrapping for moves.
 
 ### deepseek_ocr.php
 
@@ -190,12 +249,15 @@ This script is intended for the fastest possible Markdown extraction from docume
 Configuration loaded from environment variables:
 
 ```php
-Config::$ollamaServer      // OLLAMA_SERVER or http://localhost:11434
-Config::$ollamaOcrModel    // OLLAMA_OCR_MODEL or qwen3.5:9b
-Config::$ollamaImgModel    // OLLAMA_IMG_MODEL or qwen3.5:32b
-Config::$imageFormat      // IMAGE_FORMAT or png
-Config::$imageDpi         // IMAGE_DPI or 300
-Config::$timeout          // Request timeout in seconds
+Config::$ollamaServer        // OLLAMA_SERVER or http://localhost:11434
+Config::$ollamaOcrModel      // OLLAMA_OCR_MODEL or qwen3-vl:8b
+Config::$ollamaImgModel      // OLLAMA_IMG_MODEL or qwen3-vl:8b
+Config::$ollamaCheckerModel  // OLLAMA_CHECKER_MODEL or qwen3:14b
+Config::$imageFormat         // IMAGE_FORMAT or png
+Config::$imageDpi            // IMAGE_DPI or 300
+Config::$ollamaModelOptions  // Default model options: temperature, max_tokens, num_predict, num_ctx
+Config::$tempDir             // Absolute path to temp directory (hardcoded: backend/../temp)
+Config::$timeout             // Request timeout in seconds (hardcoded: 300)
 ```
 
 ### Arguments

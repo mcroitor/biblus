@@ -6,12 +6,6 @@
  * 
  * Mention: DeepSeek-OCR use specific prompt:
  * > "<image>\n<|grounding|>Convert the document to markdown."
- * 
- * As a result the model produces markdown output with the following structure:
- * 
- * 
- * 
- * This prompt allows to optimize the OCR process.
  */
 if (php_sapi_name() !== 'cli') {
     die("This script must be run from the command line.");
@@ -25,6 +19,38 @@ use \Core\Mc\Alpaca\OllamaClient;
 use \Worker\ExplodePdfWorker;
 
 // ---------- Functions ----------
+/**
+ * Creates the project directory structure for OCR processing.
+ * @param string $baseDir Base directory for the project
+ * @param string $projectName Name of the project
+ * @param bool $resume Whether to resume an existing project
+ * @return array{markdown: string, ocr: string, pages: string, project: string, visuals: string} Paths to the created directories
+ */
+function createProjectStructure(string $baseDir, string $projectName, bool $resume = false): array
+{
+    $projectDir = $baseDir . DIRECTORY_SEPARATOR . $projectName;
+    $pagesDir = $projectDir . DIRECTORY_SEPARATOR . 'pages';
+    $visualsDir = $projectDir . DIRECTORY_SEPARATOR . 'visuals';
+    $ocrDir = $projectDir . DIRECTORY_SEPARATOR . 'ocr';
+    $markdownDir = $projectDir . DIRECTORY_SEPARATOR . 'markdown';
+
+    foreach ([$pagesDir, $visualsDir, $ocrDir, $markdownDir] as $dir) {
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        } elseif (!$resume) {
+            // Clear existing files if not resuming
+            array_map('unlink', glob($dir . DIRECTORY_SEPARATOR . '*'));
+        }
+    }
+
+    return [
+        'project' => $projectDir,
+        'pages' => $pagesDir,
+        'visuals' => $visualsDir,
+        'ocr' => $ocrDir,
+        'markdown' => $markdownDir
+    ];
+}
 /**
  * Extracts image fragments based on <image> tags in the text
  * @param string $sourcePath Path to the source PNG
@@ -87,6 +113,50 @@ function extractVisualsWithImagick(string $sourcePath, string $ocrMarkdown, stri
 
     return $extractedFiles;
 }
+
+/**
+ * Cleans up the OCR text by normalizing line breaks, merging hyphenated words,
+ * and removing page numbers.
+ * @param string $text Raw OCR text to be cleaned
+ * @return string Cleaned OCR text
+ */
+function cleanMarkdown(string $text): string
+{
+    // 1. Normalize line breaks and trim trailing whitespace
+    $clean = preg_replace("/\r\n|\r/", "\n", $text);
+    $clean = preg_replace("/[ \t]+$/m", "", $clean); // Trim invisible spaces at the end of lines
+
+    // 2. Merge word-break hyphenations (with support for Cyrillic /u)
+    // Consider that after a hyphen there may be spaces before the line break
+    $clean = preg_replace("/([а-яА-Яa-zA-Z])-\s*\n\s*([а-яА-Яa-zA-Z])/u", "$1$2", $clean);
+
+    // 3. Remove page numbers (more cautious)
+    // Remove only isolated numbers (1-3 digits), if they are not part of a list
+    $clean = preg_replace("/^\s*\d{1,3}\s*$/m", "", $clean);
+
+    // 4. Collapse excessive empty lines
+    $clean = preg_replace("/\n{3,}/", "\n\n", $clean);
+
+    return trim($clean);
+}
+
+/**
+ * Compiles multiple markdown pages into a single document.
+ * @param array $markdownPages List of markdown page file paths
+ * @param string $outputPath Path to save the compiled document
+ */
+function compileDocument(array $markdownPages, string $outputPath)
+{
+    $compiled = "# Compiled Document\n\n";
+    foreach ($markdownPages as $page) {
+        $content = file_get_contents($page);
+        $cleanContent = cleanMarkdown($content);
+        $compiled .= "<!-- Page: " . basename($page) . " -->\n\n";
+        $compiled .= $cleanContent . "\n\n";
+    }
+    file_put_contents($outputPath, $compiled);
+}
+
 // ---------- Main Script ----------
 
 Arguments::Set([
@@ -136,6 +206,13 @@ Arguments::Set([
         'description' => 'Ending page number for processing (inclusive)',
         'required' => false,
         'default' => null
+    ],
+    "language" => [
+        'short' => null,
+        'long' => 'lang',
+        'description' => 'Language of the document (e.g., "english", "russian")',
+        'required' => false,
+        'default' => 'english'
     ]
 ]);
 
@@ -153,6 +230,7 @@ $server = Arguments::GetValue('ollama-server');
 $dpi = (int) Arguments::GetValue('dpi');
 $firstPage = (int) Arguments::GetValue('first-page');
 $lastPage = Arguments::GetValue('last-page') !== null ? (int) Arguments::GetValue('last-page') : null;
+$language = Arguments::GetValue('language');
 
 if (empty($inputPath)) {
     Logger::Stdout()->Error("Error: Input path is required.");
@@ -166,22 +244,14 @@ if (!file_exists($inputPath) && !is_dir($inputPath)) {
     exit(1);
 }
 
-if (!is_dir($outputDir)) {
-    mkdir($outputDir, 0755, true);
-}
+$dirs = createProjectStructure($outputDir, '_temp', false);
 
 $isPdf = is_file($inputPath) && strtolower(pathinfo($inputPath, PATHINFO_EXTENSION)) === 'pdf';
-$tempDir = $outputDir . DIRECTORY_SEPARATOR . '_temp';
-$pagesDir = $tempDir . DIRECTORY_SEPARATOR . 'pages';
-$visualsDir = $tempDir . DIRECTORY_SEPARATOR . 'visuals';
-$ocrDir = $tempDir . DIRECTORY_SEPARATOR . 'ocr';
-$markdownDir = $tempDir . DIRECTORY_SEPARATOR . 'markdown';
-
-foreach ([$pagesDir, $visualsDir, $ocrDir, $markdownDir] as $dir) {
-    if (!is_dir($dir)) {
-        mkdir($dir, 0755, true);
-    }
-}
+$tempDir = $dirs['project'];
+$pagesDir = $dirs['pages'];
+$visualsDir = $dirs['visuals'];
+$ocrDir = $dirs['ocr'];
+$markdownDir = $dirs['markdown'];
 
 if ($isPdf) {
     Logger::Stdout()->Info("Step: Exploding PDF to pages (DPI: {$dpi})...");
@@ -208,42 +278,46 @@ if (empty($pageFiles)) {
     exit(1);
 }
 
-// skip pages that are outside of the specified range
-
-
 $ocrClient = new OllamaClient($server, "deepseek-ocr");
 $maxRetries = 2;
 $firstPage = max(1, $firstPage);
 $lastPage = $lastPage !== null ? max($firstPage, $lastPage) : count($pageFiles);
+
+// skip pages that are outside of the specified range
 $pageFiles = array_slice($pageFiles, $firstPage - 1, $lastPage - $firstPage + 1);
+
 $pageNumber = $firstPage;
 
 foreach ($pageFiles as $pageFile) {
     Logger::Stdout()->Info("Processing page {$pageNumber}: {$pageFile}...");
+    $pageName = pathinfo($pageFile, PATHINFO_FILENAME);
     $image = file_get_contents($pageFile);
     $imageBase64 = base64_encode($image);
     $response = null;
     $retry = 0;
 
     while ($retry <= $maxRetries && empty($response['message']['content'])) {
-        $response = $ocrClient->Prompt("api/chat", [
+        $result = $ocrClient->Prompt("api/chat", [
             "model" => $ocrClient->GetModelName(),
             "messages" => [
                 [
                     "role" => "user",
-                    "content" => "<|grounding|>Convert the document to markdown.",
+                    "content" => "<|grounding|>Convert the document to markdown. Language: {$language}",
                     "images" => [$imageBase64]
                 ]
             ],
             "stream" => false
         ]);
+        $response = json_decode($result, JSON_OBJECT_AS_ARRAY);
+
         if (empty($response['message']['content'])) {
             $error = isset($response['error']) ? $response['error'] : 'Unknown error';
             Logger::Stdout()->Error("Received empty content from Ollama for page {$pageNumber}. Error: {$error}. Retrying... (Attempt {$retry}/{$maxRetries})");
+            Logger::Stdout()->Error("result: {$result}");
         }
         $retry++;
     }
-    file_put_contents($ocrDir . DIRECTORY_SEPARATOR . $pageName . '.log', json_encode($response, JSON_PRETTY_PRINT));
+    // file_put_contents($ocrDir . DIRECTORY_SEPARATOR . $pageName . '.log', json_encode($response, JSON_PRETTY_PRINT));
     if(empty($response['message']['content'])) {
         Logger::Stdout()->Error("Failed to get valid response from Ollama for page {$pageNumber} after {$maxRetries} attempts. Skipping page.");
         continue;
@@ -255,7 +329,18 @@ foreach ($pageFiles as $pageFile) {
     $pageNumber++;
 }
 
+// clean and compile document
+$markdownPages = glob($ocrDir . DIRECTORY_SEPARATOR . "*.md");
+if (!empty($markdownPages)) {
+    Logger::Stdout()->Info("Step: Compiling markdown pages into a single document...");
+    $outputPath = $dirs['project'] . DIRECTORY_SEPARATOR . "full_book.md";
+    compileDocument($markdownPages, $outputPath);
+    Logger::Stdout()->Info("Compiled document saved to: {$outputPath}");
+} else {
+    Logger::Stdout()->Error("No markdown pages found to compile.");
+}
+
 Logger::Stdout()->Info("*** COMPLETED SUCCESSFULLY ***");
 if ($steps['compile-document']) {
-    Logger::Stdout()->Info("Final document: {$outputDir}/full_book.md");
+    Logger::Stdout()->Info("Final document: {$dirs['project']}/full_book.md");
 }
