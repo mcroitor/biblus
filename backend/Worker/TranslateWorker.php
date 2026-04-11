@@ -76,10 +76,8 @@ class TranslateWorker
         return $results;
     }
 
-    private function TranslateTextFile(string $inputPath, string $outputPath, string $targetLanguage): void
+    public function TranslateText(string $text, string $targetLanguage): string
     {
-        $text = file_get_contents($inputPath);
-
         $prompt = $this->BuildMarkdownTranslationPrompt($text, $targetLanguage);
         $response = $this->client->Prompt("api/chat", [
             "model" => $this->client->GetModelName(),
@@ -97,7 +95,14 @@ class TranslateWorker
             throw new \Exception("Failed to parse translation response: " . json_last_error_msg());
         }
 
-        $translatedText = $data['message']['content'] ?? '';
+        return $data['message']['content'] ?? '';
+    }
+
+    private function TranslateTextFile(string $inputPath, string $outputPath, string $targetLanguage): void
+    {
+        $text = file_get_contents($inputPath);
+
+        $translatedText = $this->TranslateText($text, $targetLanguage);
 
         file_put_contents($outputPath, $translatedText);
     }

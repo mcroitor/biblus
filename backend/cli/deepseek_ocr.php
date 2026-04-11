@@ -317,7 +317,6 @@ foreach ($pageFiles as $pageFile) {
         }
         $retry++;
     }
-    // file_put_contents($ocrDir . DIRECTORY_SEPARATOR . $pageName . '.log', json_encode($response, JSON_PRETTY_PRINT));
     if(empty($response['message']['content'])) {
         Logger::Stdout()->Error("Failed to get valid response from Ollama for page {$pageNumber} after {$maxRetries} attempts. Skipping page.");
         continue;
@@ -341,6 +340,4 @@ if (!empty($markdownPages)) {
 }
 
 Logger::Stdout()->Info("*** COMPLETED SUCCESSFULLY ***");
-if ($steps['compile-document']) {
-    Logger::Stdout()->Info("Final document: {$dirs['project']}/full_book.md");
-}
+

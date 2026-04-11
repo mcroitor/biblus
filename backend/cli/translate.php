@@ -11,6 +11,7 @@ use \Core\Mc\Alpaca\OllamaClient;
 use \Core\Mc\Logger;
 use \Worker\TranslateWorker;
 
+const BATCH_SIZE = 4 * 1024; // 4 KB
 
 Arguments::Set([
     'help' => [
@@ -19,15 +20,15 @@ Arguments::Set([
         'description' => 'Show this help message and exit',
         'required' => false
     ],
-    "inputDir" => [
+    "input" => [
         "short" => "i",
-        "long" => "inputDir",
-        "description" => "Path to the input directory containing Markdown text files.",
+        "long" => "input",
+        "description" => "Path to the input directory containing Markdown text files or Markdown file.",
         "required" => true
     ],
-    "outputDir" => [
+    "output" => [
         "short" => "o",
-        "long" => "outputDir",
+        "long" => "output",
         "description" => "Path to the output directory where translated files will be saved.",
         "required" => true
     ],
@@ -63,7 +64,7 @@ Arguments::Set([
         "long" => "lastPage",
         "description" => "Last page to translate (default: all pages).",
         "required" => false,
-        "default" => null
+        "default" => 0
     ]
 ]);
 
@@ -75,18 +76,35 @@ if (Arguments::GetValue('help')) {
     exit(0);
 }
 
-$inputDir = Arguments::GetValue('inputDir');
-$outputDir = Arguments::GetValue('outputDir');
+$input = Arguments::GetValue('input');
+$output = Arguments::GetValue('output');
 $targetLanguage = trim((string) Arguments::GetValue('targetLanguage'));
 $model = Arguments::GetValue('model');
 $server = Arguments::GetValue('ollamaServer');
 $firstPage = (int) Arguments::GetValue('firstPage');
 $lastPage = (int) Arguments::GetValue('lastPage');
 
-
-if (!is_dir($inputDir)) {
-    Logger::Stdout()->Error("Input directory does not exist: {$inputDir}");
+// Validate pagination parameters
+if ($firstPage < 1) {
+    Logger::Stdout()->Error('firstPage must be >= 1.');
     exit(1);
+}
+if ($lastPage < 0) {
+    Logger::Stdout()->Error('lastPage must be >= 0 (0 means all pages).');
+    exit(1);
+}
+
+
+if(!file_exists($input)) {
+    Logger::Stdout()->Error("Input path does not exist: {$input}");
+    exit(1);
+}
+
+if(!is_dir($output)) {
+    if (!mkdir($output, 0755, true)) {
+        Logger::Stdout()->Error("Cannot create output directory: {$output}");
+        exit(1);
+    }
 }
 
 if ($targetLanguage === '') {
@@ -106,13 +124,64 @@ try {
         $server,
         $model,
         Config::$ollamaModelOptions,
-        (int) Config::$timeout
+        900
     );
 
-    Logger::Stdout()->Info("Translating Markdown files from '{$inputDir}' to '{$targetLanguage}'...");
+    if(is_file($input)) {
+        Logger::Stdout()->Info("Translating single Markdown file '{$input}' to '{$targetLanguage}'...");
+        $fileName = pathinfo($input, PATHINFO_FILENAME);
+        $translatedPath = $output . DIRECTORY_SEPARATOR . $fileName . ".md";
+        $text = file($input);
+        if ($text === false) {
+            Logger::Stdout()->Error("Cannot read input file: {$input}");
+            exit(1);
+        }
+        
+        // Remove output file if it exists to avoid duplication on re-runs
+        if (file_exists($translatedPath)) {
+            unlink($translatedPath);
+        }
+
+        $batch_idx = 0;
+
+        for($idx = 0; $idx < count($text); $batch_idx++) {
+            Logger::Stdout()->Info("Translating batch " . ($batch_idx + 1));
+            // prepare batch
+            $batch = $text[$idx];
+            $idx++;
+
+            while($idx < count($text) && strlen($batch) + strlen($text[$idx]) <= BATCH_SIZE) {
+                $batch .= $text[$idx];
+                $idx++;
+            }
+            $maxRetries = 3;
+            $attempt = 0;
+            while ($attempt < $maxRetries) {
+                try {
+                    $translated = $worker->TranslateText($batch, $targetLanguage);
+                    file_put_contents($translatedPath, $translated . PHP_EOL, FILE_APPEND);
+                    break; // Break out of retry loop on success
+                } catch (\Throwable $e) {
+                    $attempt++;
+                    Logger::Stdout()->Error("Error translating batch " . ($batch_idx + 1) . ": " . $e->getMessage());
+                    if ($attempt < $maxRetries) {
+                        Logger::Stdout()->Info("Retrying batch " . ($batch_idx + 1) . " (Attempt {$attempt}/{$maxRetries})...");
+                        sleep(2); // Wait before retrying
+                    } else {
+                        Logger::Stdout()->Error("Failed to translate batch " . ($batch_idx + 1) . " after {$maxRetries} attempts. Skipping.");
+                    }
+                }
+            }            
+        }
+        Logger::Stdout()->Info("Translated file: {$translatedPath}");
+        Logger::Stdout()->Info('*** COMPLETED SUCCESSFULLY ***');
+        exit(0);
+    }
+
+    Logger::Stdout()->Info("Translating Markdown files from '{$input}' to '{$targetLanguage}'...");
     $results = $worker->Execute(
-        $inputDir,
-        $outputDir,
+        $input,
+        $output,
         $targetLanguage,
         $firstPage,
         $lastPage
@@ -124,7 +193,7 @@ try {
     }
 
     Logger::Stdout()->Info('Translated files: ' . count($results));
-    Logger::Stdout()->Info("Output directory: {$outputDir}");
+    Logger::Stdout()->Info("Output directory: {$output}");
     Logger::Stdout()->Info('*** COMPLETED SUCCESSFULLY ***');
 } catch (\Throwable $e) {
     Logger::Stdout()->Error('Translation failed: ' . $e->getMessage());
