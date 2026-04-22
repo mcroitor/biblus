@@ -32,9 +32,9 @@ Arguments::Set([
         "description" => "Path to the output directory where translated files will be saved.",
         "required" => true
     ],
-    "targetLanguage" => [
+    "target-language" => [
         "short" => "t",
-        "long" => "targetLanguage",
+        "long" => "target-language",
         "description" => "Target language for translation (e.g., 'en' for English, 'ru' for Russian).",
         "required" => true
     ],
@@ -45,52 +45,68 @@ Arguments::Set([
         "required" => false,
         "default" => \Config::$ollamaCheckerModel
     ],
-    "ollamaServer" => [
+    "ollama-server" => [
         "short" => null,
-        "long" => "ollamaServer",
+        "long" => "ollama-server",
         "description" => "Ollama server URL (default: 'http://localhost:11434').",
         "required" => false,
         "default" => \Config::$ollamaServer
     ],
-    "firstPage" => [
+    "first-page" => [
         "short" => "f",
-        "long" => "firstPage",
+        "long" => "first-page",
         "description" => "First page to start translation from (default: 1).",
         "required" => false,
         "default" => 1
     ],
-    "lastPage" => [
+    "last-page" => [
         "short" => "l",
-        "long" => "lastPage",
+        "long" => "last-page",
         "description" => "Last page to translate (default: all pages).",
         "required" => false,
         "default" => 0
+    ],
+    'resume' => [
+        'short' => 'r',
+        'long' => 'resume',
+        'description' => 'Resume translation and skip already translated files',
+        'required' => false
     ]
 ]);
 
 Arguments::Parse();
 
+$usage = 'Usage: php ' . basename(__FILE__) . ' --input <input_path> --output <output_dir> --target-language <lang> [options]';
+
 if (Arguments::GetValue('help')) {
-    Logger::Stdout()->Info('Usage: php translate.php -i <input_dir> -o <output_dir> -t <target_language> [options]');
-    Logger::Stdout()->Info(Arguments::Help());
+    echo $usage . "\n";
+    echo Arguments::Help();
     exit(0);
 }
 
 $input = Arguments::GetValue('input');
 $output = Arguments::GetValue('output');
-$targetLanguage = trim((string) Arguments::GetValue('targetLanguage'));
+$targetLanguage = trim((string) Arguments::GetValue('target-language'));
 $model = Arguments::GetValue('model');
-$server = Arguments::GetValue('ollamaServer');
-$firstPage = (int) Arguments::GetValue('firstPage');
-$lastPage = (int) Arguments::GetValue('lastPage');
+$server = Arguments::GetValue('ollama-server');
+$firstPage = (int) Arguments::GetValue('first-page');
+$lastPage = (int) Arguments::GetValue('last-page');
+$resume = Arguments::GetValue('resume') === true;
+
+if (empty($input) || empty($output) || $targetLanguage === '') {
+    Logger::Stdout()->Error('Required arguments: --input, --output, --target-language.');
+    echo $usage . PHP_EOL;
+    echo Arguments::Help();
+    exit(1);
+}
 
 // Validate pagination parameters
 if ($firstPage < 1) {
-    Logger::Stdout()->Error('firstPage must be >= 1.');
+    Logger::Stdout()->Error('first-page must be >= 1.');
     exit(1);
 }
 if ($lastPage < 0) {
-    Logger::Stdout()->Error('lastPage must be >= 0 (0 means all pages).');
+    Logger::Stdout()->Error('last-page must be >= 0 (0 means all pages).');
     exit(1);
 }
 
@@ -131,6 +147,13 @@ try {
         Logger::Stdout()->Info("Translating single Markdown file '{$input}' to '{$targetLanguage}'...");
         $fileName = pathinfo($input, PATHINFO_FILENAME);
         $translatedPath = $output . DIRECTORY_SEPARATOR . $fileName . ".md";
+
+        if ($resume && file_exists($translatedPath)) {
+            Logger::Stdout()->Info("Resume: translated file already exists, skipping: {$translatedPath}");
+            Logger::Stdout()->Info('*** COMPLETED SUCCESSFULLY ***');
+            exit(0);
+        }
+
         $text = file($input);
         if ($text === false) {
             Logger::Stdout()->Error("Cannot read input file: {$input}");
@@ -138,7 +161,7 @@ try {
         }
         
         // Remove output file if it exists to avoid duplication on re-runs
-        if (file_exists($translatedPath)) {
+        if (!$resume && file_exists($translatedPath)) {
             unlink($translatedPath);
         }
 
@@ -179,13 +202,57 @@ try {
     }
 
     Logger::Stdout()->Info("Translating Markdown files from '{$input}' to '{$targetLanguage}'...");
+
+    $executeInput = $input;
+    $tempResumeInputDir = null;
+    if ($resume) {
+        $textFiles = glob($input . DIRECTORY_SEPARATOR . '*.md');
+        natsort($textFiles);
+        $textFiles = array_values($textFiles);
+
+        if ($lastPage === 0 || $lastPage > count($textFiles)) {
+            $lastPage = count($textFiles);
+        }
+
+        $sliceLength = max(0, $lastPage - $firstPage + 1);
+        $selectedFiles = array_slice($textFiles, $firstPage - 1, $sliceLength);
+        $pendingFiles = [];
+        foreach ($selectedFiles as $textFile) {
+            $fileName = pathinfo($textFile, PATHINFO_FILENAME);
+            $translatedPath = $output . DIRECTORY_SEPARATOR . $fileName . '.md';
+            if (!file_exists($translatedPath)) {
+                $pendingFiles[] = $textFile;
+            }
+        }
+
+        Logger::Stdout()->Info('Resume mode: pending files ' . count($pendingFiles) . '/' . count($selectedFiles));
+        if (empty($pendingFiles)) {
+            Logger::Stdout()->Info('No pending Markdown files were found for translation.');
+            exit(0);
+        }
+
+        $tempResumeInputDir = $output . DIRECTORY_SEPARATOR . '_resume_input_' . uniqid();
+        mkdir($tempResumeInputDir, 0755, true);
+        foreach ($pendingFiles as $pendingFile) {
+            copy($pendingFile, $tempResumeInputDir . DIRECTORY_SEPARATOR . basename($pendingFile));
+        }
+        $executeInput = $tempResumeInputDir;
+        $firstPage = 1;
+        $lastPage = 0;
+    }
+
     $results = $worker->Execute(
-        $input,
+        $executeInput,
         $output,
         $targetLanguage,
         $firstPage,
         $lastPage
     );
+
+    if ($tempResumeInputDir !== null && is_dir($tempResumeInputDir)) {
+        array_map('unlink', glob($tempResumeInputDir . DIRECTORY_SEPARATOR . '*.md'));
+        rmdir($tempResumeInputDir);
+    }
 
     if (empty($results)) {
         Logger::Stdout()->Info('No Markdown files were translated. Ensure input directory contains .md files.');

@@ -172,9 +172,9 @@ Arguments::Set([
         'description' => 'Path to input PDF file or directory with PNG images',
         'required' => true
     ],
-    'output-dir' => [
+    'output' => [
         'short' => 'o',
-        'long' => 'output-dir',
+        'long' => 'output',
         'description' => 'Path to the output directory',
         'required' => false,
         'default' => 'book_export'
@@ -213,38 +213,47 @@ Arguments::Set([
         'description' => 'Language of the document (e.g., "english", "russian")',
         'required' => false,
         'default' => 'english'
+    ],
+    'resume' => [
+        'short' => 'r',
+        'long' => 'resume',
+        'description' => 'Resume processing and skip already processed pages',
+        'required' => false
     ]
 ]);
 
 Arguments::Parse();
 
+$usage = 'Usage: php ' . basename(__FILE__) . ' --input <pdf_or_dir> [options]';
+
 if (Arguments::GetValue('help')) {
-    echo ("Usage: php deepseek_ocr.php --input <pdf_or_dir> [options]\n");
-    echo (Arguments::Help());
+    echo $usage . PHP_EOL;
+    echo Arguments::Help();
     exit(0);
 }
 
 $inputPath = Arguments::GetValue('input');
-$outputDir = Arguments::GetValue('output-dir');
+$outputDir = Arguments::GetValue('output');
 $server = Arguments::GetValue('ollama-server');
 $dpi = (int) Arguments::GetValue('dpi');
 $firstPage = (int) Arguments::GetValue('first-page');
 $lastPage = Arguments::GetValue('last-page') !== null ? (int) Arguments::GetValue('last-page') : null;
 $language = Arguments::GetValue('language');
+$resume = Arguments::GetValue('resume') === true;
 
 if (empty($inputPath)) {
     Logger::Stdout()->Error("Error: Input path is required.");
-    echo ("Usage: php deepseek_ocr.php --input <pdf_or_dir> [options]\n");
-    echo (Arguments::Help());
+    echo $usage . PHP_EOL;
+    echo Arguments::Help();
     exit(1);
 }
 
-if (!file_exists($inputPath) && !is_dir($inputPath)) {
+if (!file_exists($inputPath)) {
     Logger::Stdout()->Error("Error: Input path not found.");
     exit(1);
 }
 
-$dirs = createProjectStructure($outputDir, '_temp', false);
+$dirs = createProjectStructure($outputDir, '_temp', $resume);
 
 $isPdf = is_file($inputPath) && strtolower(pathinfo($inputPath, PATHINFO_EXTENSION)) === 'pdf';
 $tempDir = $dirs['project'];
@@ -254,17 +263,26 @@ $ocrDir = $dirs['ocr'];
 $markdownDir = $dirs['markdown'];
 
 if ($isPdf) {
-    Logger::Stdout()->Info("Step: Exploding PDF to pages (DPI: {$dpi})...");
-    $explodeWorker = new ExplodePdfWorker(ExplodePdfWorker::PNG, $dpi);
-    $pages = $explodeWorker->Execute($inputPath, $pagesDir);
-    Logger::Stdout()->Info("Extracted " . count($pages) . " pages.");
+    $existingPages = glob($pagesDir . DIRECTORY_SEPARATOR . "*.png");
+    if ($resume && !empty($existingPages)) {
+        Logger::Stdout()->Info("Step: Resume enabled, reusing existing exploded pages (" . count($existingPages) . ").");
+    } else {
+        Logger::Stdout()->Info("Step: Exploding PDF to pages (DPI: {$dpi})...");
+        $explodeWorker = new ExplodePdfWorker(ExplodePdfWorker::PNG, $dpi);
+        $pages = $explodeWorker->Execute($inputPath, $pagesDir);
+        Logger::Stdout()->Info("Extracted " . count($pages) . " pages.");
+    }
 } elseif (is_dir($inputPath)) {
     Logger::Stdout()->Info("Step: Copying pages from input directory...");
     $files = glob($inputPath . DIRECTORY_SEPARATOR . "*.png");
     natsort($files);
     foreach ($files as $index => $file) {
         $pageName = sprintf("page_%03d", $index + 1);
-        copy($file, $pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png');
+        $target = $pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png';
+        if ($resume && file_exists($target)) {
+            continue;
+        }
+        copy($file, $target);
     }
     Logger::Stdout()->Info("Copied " . count($files) . " pages.");
 } else {
@@ -279,6 +297,8 @@ if (empty($pageFiles)) {
 }
 
 $ocrClient = new OllamaClient($server, "deepseek-ocr");
+
+OllamaClient::SetRequestTimeout(600);
 $maxRetries = 2;
 $firstPage = max(1, $firstPage);
 $lastPage = $lastPage !== null ? max($firstPage, $lastPage) : count($pageFiles);
@@ -291,6 +311,12 @@ $pageNumber = $firstPage;
 foreach ($pageFiles as $pageFile) {
     Logger::Stdout()->Info("Processing page {$pageNumber}: {$pageFile}...");
     $pageName = pathinfo($pageFile, PATHINFO_FILENAME);
+    $targetMarkdown = $ocrDir . DIRECTORY_SEPARATOR . $pageName . '.md';
+    if ($resume && file_exists($targetMarkdown)) {
+        Logger::Stdout()->Info("Resume: skipping {$pageName}, output already exists.");
+        $pageNumber++;
+        continue;
+    }
     $image = file_get_contents($pageFile);
     $imageBase64 = base64_encode($image);
     $response = null;
@@ -323,7 +349,7 @@ foreach ($pageFiles as $pageFile) {
     }
     else{
         Logger::Stdout()->Info("Successfully processed page {$pageNumber}.");
-        file_put_contents($ocrDir . DIRECTORY_SEPARATOR . $pageName . '.md', $response['message']['content']);
+        file_put_contents($targetMarkdown, $response['message']['content']);
     }
     $pageNumber++;
 }
@@ -340,4 +366,3 @@ if (!empty($markdownPages)) {
 }
 
 Logger::Stdout()->Info("*** COMPLETED SUCCESSFULLY ***");
-

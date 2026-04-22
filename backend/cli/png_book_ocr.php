@@ -12,6 +12,20 @@ use \Worker\ImageDetectWorker;
 use \Worker\FormatMarkdownWorker;
 use \Worker\CompileDocumentWorker;
 
+function collectPendingPngPages(array $sourceFiles, string $markdownDir): array
+{
+    $pending = [];
+    foreach ($sourceFiles as $file) {
+        $pageName = pathinfo($file, PATHINFO_FILENAME);
+        $markdownFile = $markdownDir . DIRECTORY_SEPARATOR . $pageName . '.md';
+        if (!file_exists($markdownFile)) {
+            $pending[] = $file;
+        }
+    }
+
+    return $pending;
+}
+
 Arguments::Set([
     'help' => [
         'short' => 'h',
@@ -19,15 +33,15 @@ Arguments::Set([
         'description' => 'Show this help message and exit',
         'required' => false
     ],
-    'input-dir' => [
-        'short' => null,
-        'long' => 'input-dir',
+    'input' => [
+        'short' => 'i',
+        'long' => 'input',
         'description' => 'Path to the input directory with PNG files',
         'required' => true
     ],
-    'output-dir' => [
-        'short' => null,
-        'long' => 'output-dir',
+    'output' => [
+        'short' => 'o',
+        'long' => 'output',
         'description' => 'Path to the output directory',
         'required' => false,
         'default' => 'output_dir'
@@ -52,22 +66,38 @@ Arguments::Set([
         'description' => 'Ollama model for image analysis',
         'required' => false,
         'default' => Config::$ollamaImgModel
+    ],
+    'resume' => [
+        'short' => 'r',
+        'long' => 'resume',
+        'description' => 'Resume processing and skip pages with existing markdown output',
+        'required' => false
     ]
 ]);
 
 Arguments::Parse();
 
+$usage = 'Usage: php ' . basename(__FILE__) . ' --input <input_dir> [options]';
+
 if (Arguments::GetValue('help')) {
-    echo ("Usage: php png_book_ocr.php --input-dir <input_dir> [options]");
+    echo ($usage . "\n");
     echo (Arguments::Help());
     exit(0);
 }
 
-$inputDir = Arguments::GetValue('input-dir');
-$outputDir = Arguments::GetValue('output-dir');
+$inputDir = Arguments::GetValue('input');
+$outputDir = Arguments::GetValue('output');
 $server = Arguments::GetValue('ollama-server');
 $ocrModel = Arguments::GetValue('ollama-ocr-model');
 $imgModel = Arguments::GetValue('ollama-img-model');
+$resume = Arguments::GetValue('resume') === true;
+
+if (empty($inputDir)) {
+    Logger::Stdout()->Error('Error: Input directory path is required.');
+    echo $usage . PHP_EOL;
+    echo Arguments::Help();
+    exit(1);
+}
 
 if (!is_dir($inputDir)) {
     Logger::Stdout()->Error("Error: Input directory not found.");
@@ -114,14 +144,48 @@ if (!$formatWorker->checkModelExists()) {
 Logger::Stdout()->Info("Copying pages to working directory...");
 foreach ($files as $index => $file) {
     $pageName = pathinfo($file, PATHINFO_FILENAME);
-    copy($file, $pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png');
+    $target = $pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png';
+    if ($resume && file_exists($target)) {
+        continue;
+    }
+    copy($file, $target);
 }
 
-Logger::Stdout()->Info("Step 1/3: Detecting images on pages...");
-$imageResults = $imageWorker->Execute($pagesDir, $visualsDir);
+$filesToProcess = $files;
+if ($resume) {
+    $filesToProcess = collectPendingPngPages($files, $markdownDir);
+    Logger::Stdout()->Info("Resume mode: pending pages " . count($filesToProcess) . "/" . count($files));
+}
 
-Logger::Stdout()->Info("Step 2/3: Formatting markdown...");
-$markdownResults = $formatWorker->Execute($pagesDir, $visualsDir, $imageResults, $markdownDir);
+$processingPagesDir = $pagesDir;
+if ($resume) {
+    $processingPagesDir = $outputDir . DIRECTORY_SEPARATOR . 'pending_pages';
+    if (!is_dir($processingPagesDir)) {
+        mkdir($processingPagesDir, 0755, true);
+    }
+    array_map('unlink', glob($processingPagesDir . DIRECTORY_SEPARATOR . '*.png'));
+    foreach ($filesToProcess as $file) {
+        $pageName = pathinfo($file, PATHINFO_FILENAME);
+        copy($pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png', $processingPagesDir . DIRECTORY_SEPARATOR . $pageName . '.png');
+    }
+}
+
+$markdownResults = [];
+if (!empty($filesToProcess)) {
+    Logger::Stdout()->Info("Step 1/3: Detecting images on pages...");
+    $imageResults = $imageWorker->Execute($processingPagesDir, $visualsDir);
+
+    Logger::Stdout()->Info("Step 2/3: Formatting markdown...");
+    $markdownResults = $formatWorker->Execute($processingPagesDir, $visualsDir, $imageResults, $markdownDir);
+} else {
+    Logger::Stdout()->Info("Resume: no pending pages for processing.");
+}
+
+if (empty($markdownResults)) {
+    $markdownResults = glob($markdownDir . DIRECTORY_SEPARATOR . '*.md');
+    natsort($markdownResults);
+    $markdownResults = array_values($markdownResults);
+}
 
 Logger::Stdout()->Info("Step 3/3: Assembling full book...");
 $compileWorker = new CompileDocumentWorker("Book OCR");

@@ -1,5 +1,9 @@
 <?php
 
+if (php_sapi_name() !== 'cli') {
+    die("This script must be run from the command line.");
+}
+
 include_once __DIR__ . '/../config.php';
 
 use \Core\Arguments;
@@ -36,6 +40,12 @@ Maintain the original meaning while fixing scanning artifacts.
 Return ONLY the cleaned Markdown text.';
 
 Arguments::Set([
+    'help' => [
+        'short' => 'h',
+        'long' => 'help',
+        'description' => 'Show this help message and exit',
+        'required' => false
+    ],
     "input" => [
         "short" => "i",
         "long" => "input",
@@ -56,28 +66,42 @@ Arguments::Set([
         "required" => false,
         "default" => \Config::$ollamaOcrModel
     ],
-    "ollamaServer" => [
+    "ollama-server" => [
         "short" => null,
         "long" => "ollama-server",
         "description" => "Ollama server host (default: " . \Config::$ollamaServer . ").",
         "required" => false,
         "default" => \Config::$ollamaServer
+    ],
+    "ollamaServer" => [
+        "short" => null,
+        "long" => "ollamaServer",
+        "description" => "[Deprecated] Alias for --ollama-server.",
+        "required" => false
     ]
 ]);
 
 Arguments::Parse();
 
-if(empty(Arguments::$input)) {
+$usage = 'Usage: php ' . basename(__FILE__) . ' --input <input_file.md> [options]';
+
+if (Arguments::GetValue('help')) {
+    echo $usage . "\n";
+    echo Arguments::Help();
+    exit(0);
+}
+
+$inputPath = Arguments::GetValue('input');
+$outputPath = Arguments::GetValue('output');
+$model = Arguments::GetValue('model');
+$ollamaServer = Arguments::GetValue('ollama-server') ?? Arguments::GetValue('ollamaServer');
+
+if (empty($inputPath)) {
     $logger->Error("Input file path is required. Use -i or --input to specify it.");
-    echo "Usage: php {$argv[0]} -i <input_file> [<options>]\n";
+    echo $usage . "\n";
     echo Arguments::Help();
     exit(1);
 }
-
-$inputPath = Arguments::Get("input");
-$outputPath = Arguments::Get("output");
-$model = Arguments::Get("model");
-$ollamaServer = Arguments::Get("ollamaServer");
 
 if(!file_exists($inputPath)) {
     $logger->Error("Input file not found: {$inputPath}");

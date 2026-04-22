@@ -17,11 +17,17 @@ Arguments::Set([
         'description' => 'Show this help message and exit',
         'required' => false
     ],
-    'image' => [
+    'input' => [
         'short' => 'i',
-        'long' => 'image',
+        'long' => 'input',
         'description' => 'Path to the input image file (PNG)',
         'required' => true
+    ],
+    'image' => [
+        'short' => null,
+        'long' => 'image',
+        'description' => '[Deprecated] Alias for --input',
+        'required' => false
     ],
     'output' => [
         'short' => 'o',
@@ -47,13 +53,29 @@ Arguments::Set([
 
 Arguments::Parse();
 
+$usage = 'Usage: php ' . basename(__FILE__) . ' --input <image.png> [options]';
+
 if (Arguments::GetValue('help')) {
-    Logger::Stdout()->Info("Usage: php ocr.php -i <image.png> [options]");
-    Logger::Stdout()->Info(Arguments::Help());
+    echo $usage . "\n";
+    echo Arguments::Help();
     exit(0);
 }
 
-$imagePath = Arguments::GetValue('image');
+$inputPath = Arguments::GetValue('input') ?? Arguments::GetValue('image');
+$imagePath = $inputPath;
+
+if (empty($imagePath)) {
+    Logger::Stdout()->Error('Error: Input image path is required.');
+    echo $usage . "\n";
+    echo Arguments::Help();
+    exit(1);
+}
+
+if (!is_file($imagePath)) {
+    Logger::Stdout()->Error("Error: Input image not found: {$imagePath}");
+    exit(1);
+}
+
 $outputPath = Arguments::GetValue('output') ?? (pathinfo($imagePath, PATHINFO_FILENAME) . '.md');
 $server = Arguments::GetValue('ollama-server');
 $model = Arguments::GetValue('model');

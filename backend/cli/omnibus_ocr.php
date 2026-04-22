@@ -14,6 +14,29 @@ use \Worker\TextDetectWorker;
 use \Worker\FormatMarkdownWorker;
 use \Worker\CompileDocumentWorker;
 
+function buildPendingPagesDir(array $sourcePageFiles, string $pendingDir, callable $shouldInclude): array
+{
+    if (!is_dir($pendingDir)) {
+        mkdir($pendingDir, 0755, true);
+    }
+
+    array_map('unlink', glob($pendingDir . DIRECTORY_SEPARATOR . '*.png'));
+
+    $pending = [];
+    foreach ($sourcePageFiles as $pageFile) {
+        $pageName = pathinfo($pageFile, PATHINFO_FILENAME);
+        if (!$shouldInclude($pageName)) {
+            continue;
+        }
+
+        $target = $pendingDir . DIRECTORY_SEPARATOR . basename($pageFile);
+        copy($pageFile, $target);
+        $pending[] = $target;
+    }
+
+    return $pending;
+}
+
 Arguments::Set([
     'help' => [
         'short' => 'h',
@@ -27,9 +50,9 @@ Arguments::Set([
         'description' => 'Path to input PDF file or directory with PNG images',
         'required' => true
     ],
-    'output-dir' => [
+    'output' => [
         'short' => 'o',
-        'long' => 'output-dir',
+        'long' => 'output',
         'description' => 'Path to the output directory',
         'required' => false,
         'default' => 'book_export'
@@ -124,19 +147,27 @@ Arguments::Set([
         'description' => 'Whether to compile final document',
         'required' => false,
 //        'default' => false
+    ],
+    'resume' => [
+        'short' => 'r',
+        'long' => 'resume',
+        'description' => 'Resume processing and skip already generated outputs',
+        'required' => false
     ]
 ]);
 
 Arguments::Parse();
 
+$usage = 'Usage: php ' . basename(__FILE__) . ' --input <pdf_or_dir> [options]';
+
 if (Arguments::GetValue('help')) {
-    echo ("Usage: php omnibus_ocr.php --input <pdf_or_dir> [options]\n");
-    echo (Arguments::Help());
+    echo $usage . PHP_EOL;
+    echo Arguments::Help();
     exit(0);
 }
 
 $inputPath = Arguments::GetValue('input');
-$outputDir = Arguments::GetValue('output-dir');
+$outputDir = Arguments::GetValue('output');
 $server = Arguments::GetValue('ollama-server');
 $ocrModel = Arguments::GetValue('ollama-ocr-model');
 $imgModel = Arguments::GetValue('ollama-img-model');
@@ -144,11 +175,12 @@ $checkerModel = Arguments::GetValue('ollama-checker-model');
 $dpi = (int) Arguments::GetValue('dpi');
 $firstPage = (int) Arguments::GetValue('first-page');
 $lastPage = (int)Arguments::GetValue('last-page');
+$resume = Arguments::GetValue('resume') === true;
 
 if(empty($inputPath)) {
     Logger::Stdout()->Error("Error: Input path is required.");
-    echo ("Usage: php omnibus_ocr.php --input <pdf_or_dir> [options]\n");
-    echo (Arguments::Help());
+    echo $usage . PHP_EOL;
+    echo Arguments::Help();
     exit(1);
 }
 
@@ -185,10 +217,15 @@ foreach ([$pagesDir, $selectedPagesDir, $visualsDir, $ocrDir, $markdownDir] as $
 }
 
 if ($steps['explode-pdf'] && $isPdf) {
-    Logger::Stdout()->Info("Step: Exploding PDF to pages (DPI: {$dpi})...");
-    $explodeWorker = new ExplodePdfWorker(ExplodePdfWorker::PNG, $dpi);
-    $pages = $explodeWorker->Execute($inputPath, $pagesDir);
-    Logger::Stdout()->Info("Extracted " . count($pages) . " pages.");
+    $existingPages = glob($pagesDir . DIRECTORY_SEPARATOR . '*.png');
+    if ($resume && !empty($existingPages)) {
+        Logger::Stdout()->Info("Step: Resume enabled, reusing existing exploded pages (" . count($existingPages) . ").");
+    } else {
+        Logger::Stdout()->Info("Step: Exploding PDF to pages (DPI: {$dpi})...");
+        $explodeWorker = new ExplodePdfWorker(ExplodePdfWorker::PNG, $dpi);
+        $pages = $explodeWorker->Execute($inputPath, $pagesDir);
+        Logger::Stdout()->Info("Extracted " . count($pages) . " pages.");
+    }
 } elseif (is_dir($inputPath)) {
     Logger::Stdout()->Info("Step: Copying pages from input directory...");
     $files = glob($inputPath . DIRECTORY_SEPARATOR . "*.png");
@@ -196,7 +233,11 @@ if ($steps['explode-pdf'] && $isPdf) {
     $files = array_values($files);
     foreach ($files as $index => $file) {
         $pageName = sprintf("page_%03d", $index + 1);
-        copy($file, $pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png');
+        $target = $pagesDir . DIRECTORY_SEPARATOR . $pageName . '.png';
+        if ($resume && file_exists($target)) {
+            continue;
+        }
+        copy($file, $target);
     }
     Logger::Stdout()->Info("Copied " . count($files) . " pages.");
 } else {
@@ -225,39 +266,111 @@ if ($firstPage > $lastPage) {
 $pageFiles = array_values(array_slice($pageFiles, $firstPage - 1, $lastPage - $firstPage + 1));
 Logger::Stdout()->Info("Processing pages from $firstPage to $lastPage...");
 
-$selectedPages = glob($selectedPagesDir . DIRECTORY_SEPARATOR . "*.png");
-foreach ($selectedPages as $selectedPage) {
-    unlink($selectedPage);
+if (!$resume) {
+    $selectedPages = glob($selectedPagesDir . DIRECTORY_SEPARATOR . "*.png");
+    foreach ($selectedPages as $selectedPage) {
+        unlink($selectedPage);
+    }
 }
 
 foreach ($pageFiles as $pageFile) {
     $targetFile = $selectedPagesDir . DIRECTORY_SEPARATOR . basename($pageFile);
+    if ($resume && file_exists($targetFile)) {
+        continue;
+    }
     copy($pageFile, $targetFile);
 }
 
 $imageResults = [];
 $markdownResults = [];
+$pendingBaseDir = $tempDir . DIRECTORY_SEPARATOR . 'pending';
+if (!is_dir($pendingBaseDir)) {
+    mkdir($pendingBaseDir, 0755, true);
+}
+
+$selectedPageFiles = glob($selectedPagesDir . DIRECTORY_SEPARATOR . '*.png');
+natsort($selectedPageFiles);
+$selectedPageFiles = array_values($selectedPageFiles);
 
 if ($steps['extract-pictures']) {
     Logger::Stdout()->Info("Step: Detecting and extracting pictures...");
     $imageWorker = new ImageDetectWorker($server, $imgModel);
-    $imageResults = $imageWorker->Execute($selectedPagesDir, $visualsDir);
+
+    if ($resume) {
+        $pendingPages = buildPendingPagesDir(
+            $selectedPageFiles,
+            $pendingBaseDir . DIRECTORY_SEPARATOR . 'images',
+            function (string $pageName) use ($visualsDir): bool {
+                $imagesDir = $visualsDir . DIRECTORY_SEPARATOR . $pageName . DIRECTORY_SEPARATOR . 'images';
+                return !is_dir($imagesDir) || empty(glob($imagesDir . DIRECTORY_SEPARATOR . '*.png'));
+            }
+        );
+
+        if (empty($pendingPages)) {
+            Logger::Stdout()->Info("Resume: no pending pages for image extraction.");
+        } else {
+            $imageResults = $imageWorker->Execute($pendingBaseDir . DIRECTORY_SEPARATOR . 'images', $visualsDir);
+        }
+    } else {
+        $imageResults = $imageWorker->Execute($selectedPagesDir, $visualsDir);
+    }
 }
 
 if ($steps['extract-text']) {
     Logger::Stdout()->Info("Step: Extracting text (OCR)...");
     $ocrWorker = new TextDetectWorker($server, $ocrModel);
-    $ocrWorker->Execute($selectedPagesDir, $ocrDir);
+
+    if ($resume) {
+        $pendingPages = buildPendingPagesDir(
+            $selectedPageFiles,
+            $pendingBaseDir . DIRECTORY_SEPARATOR . 'ocr',
+            function (string $pageName) use ($ocrDir): bool {
+                return !file_exists($ocrDir . DIRECTORY_SEPARATOR . $pageName . '.txt');
+            }
+        );
+
+        if (empty($pendingPages)) {
+            Logger::Stdout()->Info("Resume: no pending pages for OCR.");
+        } else {
+            $ocrWorker->Execute($pendingBaseDir . DIRECTORY_SEPARATOR . 'ocr', $ocrDir);
+        }
+    } else {
+        $ocrWorker->Execute($selectedPagesDir, $ocrDir);
+    }
 }
 
 if ($steps['format-markdown']) {
     Logger::Stdout()->Info("Step: Formatting markdown...");
     $formatWorker = new FormatMarkdownWorker($server, $checkerModel);
-    $markdownResults = $formatWorker->Execute($selectedPagesDir, $ocrDir, $imageResults, $markdownDir);
+
+    if ($resume) {
+        $pendingPages = buildPendingPagesDir(
+            $selectedPageFiles,
+            $pendingBaseDir . DIRECTORY_SEPARATOR . 'markdown',
+            function (string $pageName) use ($markdownDir): bool {
+                return !file_exists($markdownDir . DIRECTORY_SEPARATOR . $pageName . '.md');
+            }
+        );
+
+        if (empty($pendingPages)) {
+            Logger::Stdout()->Info("Resume: no pending pages for markdown formatting.");
+        } else {
+            $markdownResults = $formatWorker->Execute($pendingBaseDir . DIRECTORY_SEPARATOR . 'markdown', $ocrDir, $imageResults, $markdownDir);
+        }
+    } else {
+        $markdownResults = $formatWorker->Execute($selectedPagesDir, $ocrDir, $imageResults, $markdownDir);
+    }
 }
 
 if ($steps['compile-document']) {
     Logger::Stdout()->Info("Step: Compiling document...");
+
+    if ($resume && empty($markdownResults)) {
+        $markdownResults = glob($markdownDir . DIRECTORY_SEPARATOR . '*.md');
+        natsort($markdownResults);
+        $markdownResults = array_values($markdownResults);
+    }
+
     $compileWorker = new CompileDocumentWorker("Full Book OCR");
     $compileWorker->Execute($markdownResults, $outputDir . DIRECTORY_SEPARATOR . 'full_book.md', $tempDir);
 }
